@@ -1,0 +1,239 @@
+name: 构建并推送 Docker 镜像
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '要构建的 Release 标签，留空则自动使用当前仓库最新正式 Release，例如：v1.0.3'
+        required: false
+        type: string
+        default: ''
+      push_ghcr:
+        description: '推送到 GHCR'
+        required: false
+        type: boolean
+        default: true
+      push_aliyun:
+        description: '推送到阿里云镜像仓库'
+        required: false
+        type: boolean
+        default: true
+      push_dockerhub:
+        description: '推送到 Docker Hub'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-image-build
+  cancel-in-progress: false
+
+jobs:
+  docker:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v5
+
+      - name: 解析构建参数
+        id: prep
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_PUSH_GHCR: ${{ inputs.push_ghcr }}
+          INPUT_PUSH_ALIYUN: ${{ inputs.push_aliyun }}
+          INPUT_PUSH_DOCKERHUB: ${{ inputs.push_dockerhub }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          repo="${GITHUB_REPOSITORY}"
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          owner_lc="$(echo "${owner}" | tr '[:upper:]' '[:lower:]')"
+
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          repo_name_lc="$(echo "${repo_name}" | tr '[:upper:]' '[:lower:]')"
+
+          # 镜像名默认使用当前仓库名（小写）
+          image_name="${repo_name_lc}"
+
+          manual_tag_mode="false"
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            release_tag="${INPUT_RELEASE_TAG}"
+            manual_tag_mode="true"
+            echo "使用手动指定的 Release 标签：${release_tag}"
+          else
+            release_tag="$(gh api "repos/${repo}/releases/latest" --jq '.tag_name')"
+            echo "未填写 Release 标签，自动使用最新正式 Release：${release_tag}"
+          fi
+
+          push_ghcr="${INPUT_PUSH_GHCR}"
+          push_aliyun="${INPUT_PUSH_ALIYUN}"
+          push_dockerhub="${INPUT_PUSH_DOCKERHUB}"
+
+          if [ "${push_ghcr}" != "true" ] && [ "${push_aliyun}" != "true" ] && [ "${push_dockerhub}" != "true" ]; then
+            echo "至少需要开启一个推送目标"
+            exit 1
+          fi
+
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "manual_tag_mode=${manual_tag_mode}" >> "$GITHUB_OUTPUT"
+          echo "push_ghcr=${push_ghcr}" >> "$GITHUB_OUTPUT"
+          echo "push_aliyun=${push_aliyun}" >> "$GITHUB_OUTPUT"
+          echo "push_dockerhub=${push_dockerhub}" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
+          echo "repo_name_lc=${repo_name_lc}" >> "$GITHUB_OUTPUT"
+          echo "image_name=${image_name}" >> "$GITHUB_OUTPUT"
+
+      - name: 检查所需密钥
+        env:
+          PUSH_GHCR: ${{ steps.prep.outputs.push_ghcr }}
+          PUSH_ALIYUN: ${{ steps.prep.outputs.push_aliyun }}
+          PUSH_DOCKERHUB: ${{ steps.prep.outputs.push_dockerhub }}
+          ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ "${PUSH_ALIYUN}" = "true" ]; then
+            [ -n "${ALIYUN_REGISTRY}" ] || { echo "缺少 secrets.ALIYUN_REGISTRY"; exit 1; }
+            [ -n "${ALIYUN_NAMESPACE}" ] || { echo "缺少 secrets.ALIYUN_NAMESPACE"; exit 1; }
+            [ -n "${ALIYUN_USERNAME}" ] || { echo "缺少 secrets.ALIYUN_USERNAME"; exit 1; }
+            [ -n "${ALIYUN_PASSWORD}" ] || { echo "缺少 secrets.ALIYUN_PASSWORD"; exit 1; }
+          fi
+
+          if [ "${PUSH_DOCKERHUB}" = "true" ]; then
+            [ -n "${DOCKERHUB_USERNAME}" ] || { echo "缺少 secrets.DOCKERHUB_USERNAME"; exit 1; }
+            [ -n "${DOCKERHUB_TOKEN}" ] || { echo "缺少 secrets.DOCKERHUB_TOKEN"; exit 1; }
+          fi
+
+          echo "密钥检查通过"
+
+      - name: 从 Release 下载 Chromium 二进制
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prep.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "开始下载 Release 附件：${RELEASE_TAG}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'ungoogled-chromium-*_linux.tar.gz' \
+            --dir .
+
+      - name: 设置 QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        if: ${{ steps.prep.outputs.push_ghcr == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+
+      - name: 登录阿里云镜像仓库
+        if: ${{ steps.prep.outputs.push_aliyun == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
+      - name: 登录 Docker Hub
+        if: ${{ steps.prep.outputs.push_dockerhub == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 生成镜像标签
+        id: tags
+        env:
+          RELEASE_TAG: ${{ steps.prep.outputs.release_tag }}
+          MANUAL_TAG_MODE: ${{ steps.prep.outputs.manual_tag_mode }}
+          PUSH_GHCR: ${{ steps.prep.outputs.push_ghcr }}
+          PUSH_ALIYUN: ${{ steps.prep.outputs.push_aliyun }}
+          PUSH_DOCKERHUB: ${{ steps.prep.outputs.push_dockerhub }}
+          OWNER_LC: ${{ steps.prep.outputs.owner_lc }}
+          IMAGE_NAME: ${{ steps.prep.outputs.image_name }}
+          ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          raw_tags=""
+
+          add_tag() {
+            local tag="$1"
+            if [ -n "${tag}" ]; then
+              raw_tags="${raw_tags}${tag}"$'\n'
+            fi
+          }
+
+          if [ "${PUSH_GHCR}" = "true" ]; then
+            add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${RELEASE_TAG}"
+            if [ "${MANUAL_TAG_MODE}" != "true" ]; then
+              add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:latest"
+            fi
+          fi
+
+          if [ "${PUSH_ALIYUN}" = "true" ]; then
+            add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:${RELEASE_TAG}"
+            if [ "${MANUAL_TAG_MODE}" != "true" ]; then
+              add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:latest"
+            fi
+          fi
+
+          if [ "${PUSH_DOCKERHUB}" = "true" ]; then
+            add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${RELEASE_TAG}"
+            if [ "${MANUAL_TAG_MODE}" != "true" ]; then
+              add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
+            fi
+          fi
+
+          if [ -z "${raw_tags}" ]; then
+            echo "未生成任何镜像标签"
+            exit 1
+          fi
+
+          {
+            echo "tags<<EOF"
+            printf "%s" "${raw_tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "本次将推送以下标签："
+          printf "%s" "${raw_tags}"
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          no-cache: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=${{ steps.prep.outputs.image_name }}
+            org.opencontainers.image.description=ChromiumManager container image
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.prep.outputs.release_tag }}
