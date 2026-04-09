@@ -1,7 +1,13 @@
-name: 同步上游 Releases（默认密钥优先，失败后用备用密钥）
+name: 同步上游 Releases（默认密钥优先，可选强制重同步）
 
 on:
   workflow_dispatch:
+    inputs:
+      force_resync:
+        description: '是否强制重新同步已存在的标签、Release 和附件'
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: "15 */6 * * *"
 
@@ -42,6 +48,7 @@ jobs:
         env:
           DEFAULT_GH_TOKEN: ${{ github.token }}
           FALLBACK_GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          FORCE_RESYNC: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_resync || 'false' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -49,6 +56,14 @@ jobs:
 
           tmp_root="$(mktemp -d)"
           trap 'rm -rf "$tmp_root"' EXIT
+
+          force_resync="${FORCE_RESYNC:-false}"
+
+          if [ "$force_resync" = "true" ]; then
+            echo "当前模式：强制重新同步"
+          else
+            echo "当前模式：普通同步（已有则跳过）"
+          fi
 
           default_push_url="https://x-access-token:${DEFAULT_GH_TOKEN}@github.com/${TARGET_REPO}.git"
           fallback_push_url=""
@@ -74,20 +89,47 @@ jobs:
 
           push_tag_with_fallback() {
             local tag="$1"
+            local push_mode="${2:-normal}"
 
-            if git push "$default_push_url" "refs/tags/${tag}:refs/tags/${tag}"; then
-              return 0
+            if [ "$push_mode" = "force" ]; then
+              if git push --force "$default_push_url" "refs/tags/${tag}:refs/tags/${tag}"; then
+                return 0
+              fi
+            else
+              if git push "$default_push_url" "refs/tags/${tag}:refs/tags/${tag}"; then
+                return 0
+              fi
             fi
 
             local status=$?
 
             if [ -n "${fallback_push_url:-}" ]; then
               echo "默认密钥推送标签失败，改用备用密钥重试：$tag"
-              git push "$fallback_push_url" "refs/tags/${tag}:refs/tags/${tag}"
+              if [ "$push_mode" = "force" ]; then
+                git push --force "$fallback_push_url" "refs/tags/${tag}:refs/tags/${tag}"
+              else
+                git push "$fallback_push_url" "refs/tags/${tag}:refs/tags/${tag}"
+              fi
               return $?
             fi
 
             return $status
+          }
+
+          release_exists_with_fallback() {
+            local tag="$1"
+
+            if GH_TOKEN="$DEFAULT_GH_TOKEN" gh release view "$tag" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+              return 0
+            fi
+
+            if [ -n "${FALLBACK_GH_TOKEN:-}" ]; then
+              if GH_TOKEN="$FALLBACK_GH_TOKEN" gh release view "$tag" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+                return 0
+              fi
+            fi
+
+            return 1
           }
 
           create_release_with_fallback() {
@@ -106,40 +148,148 @@ jobs:
             return $status
           }
 
-          mapfile -t RELEASE_ROWS < <(
+          edit_release_with_fallback() {
+            local tag="$1"
+            local title="$2"
+            local notes_file="$3"
+            local prerelease="$4"
+
+            local args=(
+              "$tag"
+              --repo "$TARGET_REPO"
+              --title "$title"
+              --notes-file "$notes_file"
+            )
+
+            if [ "$prerelease" = "true" ]; then
+              args+=(--prerelease)
+            fi
+
+            if GH_TOKEN="$DEFAULT_GH_TOKEN" gh release edit "${args[@]}"; then
+              return 0
+            fi
+
+            local status=$?
+
+            if [ -n "${FALLBACK_GH_TOKEN:-}" ]; then
+              echo "默认密钥更新 Release 失败，改用备用密钥重试：$tag"
+              GH_TOKEN="$FALLBACK_GH_TOKEN" gh release edit "${args[@]}"
+              return $?
+            fi
+
+            return $status
+          }
+
+          upload_assets_with_fallback() {
+            local tag="$1"
+            shift
+
+            if [ "$#" -eq 0 ]; then
+              return 0
+            fi
+
+            if GH_TOKEN="$DEFAULT_GH_TOKEN" gh release upload "$tag" "$@" --repo "$TARGET_REPO" --clobber; then
+              return 0
+            fi
+
+            local status=$?
+
+            if [ -n "${FALLBACK_GH_TOKEN:-}" ]; then
+              echo "默认密钥上传附件失败，改用备用密钥重试：$tag"
+              GH_TOKEN="$FALLBACK_GH_TOKEN" gh release upload "$tag" "$@" --repo "$TARGET_REPO" --clobber
+              return $?
+            fi
+
+            return $status
+          }
+
+          delete_asset_with_fallback() {
+            local tag="$1"
+            local asset_name="$2"
+
+            if GH_TOKEN="$DEFAULT_GH_TOKEN" gh release delete-asset "$tag" "$asset_name" --repo "$TARGET_REPO" --yes; then
+              return 0
+            fi
+
+            local status=$?
+
+            if [ -n "${FALLBACK_GH_TOKEN:-}" ]; then
+              echo "默认密钥删除旧附件失败，改用备用密钥重试：$asset_name"
+              GH_TOKEN="$FALLBACK_GH_TOKEN" gh release delete-asset "$tag" "$asset_name" --repo "$TARGET_REPO" --yes
+              return $?
+            fi
+
+            return $status
+          }
+
+          set_latest_with_fallback() {
+            local tag="$1"
+
+            if GH_TOKEN="$DEFAULT_GH_TOKEN" gh release edit "$tag" --repo "$TARGET_REPO" --latest; then
+              return 0
+            fi
+
+            local status=$?
+
+            if [ -n "${FALLBACK_GH_TOKEN:-}" ]; then
+              echo "默认密钥设置首页最新版本失败，改用备用密钥重试：$tag"
+              GH_TOKEN="$FALLBACK_GH_TOKEN" gh release edit "$tag" --repo "$TARGET_REPO" --latest
+              return $?
+            fi
+
+            return $status
+          }
+
+          # 按版本号从低到高排序
+          mapfile -t RELEASE_TAGS < <(
             GH_TOKEN="$DEFAULT_GH_TOKEN" gh api --paginate \
               -H "Accept: application/vnd.github+json" \
               "repos/$UPSTREAM_REPO/releases?per_page=100" \
-              --jq '.[] | @base64'
+              --jq '.[] | select(.draft == false) | .tag_name' \
+              | sort -V
           )
 
-          if [ "${#RELEASE_ROWS[@]}" -eq 0 ]; then
+          if [ "${#RELEASE_TAGS[@]}" -eq 0 ]; then
             echo "上游仓库未找到任何 Releases：$UPSTREAM_REPO"
             exit 0
           fi
 
-          for row in "${RELEASE_ROWS[@]}"; do
-            json="$(printf '%s' "$row" | base64 -d)"
+          latest_stable_tag=""
 
-            tag="$(jq -r '.tag_name' <<<"$json")"
-            name="$(jq -r '.name // .tag_name' <<<"$json")"
-            body="$(jq -r '.body // ""' <<<"$json")"
-            draft="$(jq -r '.draft' <<<"$json")"
-            prerelease="$(jq -r '.prerelease' <<<"$json")"
-            asset_count="$(jq -r '.assets | length' <<<"$json")"
+          # 因为已经低到高排序，这里最后一个非预发布版就是最新正式版
+          for tag in "${RELEASE_TAGS[@]}"; do
+            prerelease="$(
+              GH_TOKEN="$DEFAULT_GH_TOKEN" gh api \
+                -H "Accept: application/vnd.github+json" \
+                "repos/$UPSTREAM_REPO/releases/tags/${tag}" \
+                --jq '.prerelease'
+            )"
 
-            if [ "$draft" = "true" ]; then
-              echo "跳过草稿版本：$tag"
-              continue
+            if [ "$prerelease" = "false" ]; then
+              latest_stable_tag="$tag"
             fi
+          done
 
+          echo "预计设为首页最新版本：${latest_stable_tag:-未找到正式版}"
+
+          for tag in "${RELEASE_TAGS[@]}"; do
             echo "========================================"
             echo "正在处理版本：$tag"
+
+            json="$(
+              GH_TOKEN="$DEFAULT_GH_TOKEN" gh api \
+                -H "Accept: application/vnd.github+json" \
+                "repos/$UPSTREAM_REPO/releases/tags/${tag}"
+            )"
+
+            name="$(jq -r '.name // .tag_name' <<<"$json")"
+            body="$(jq -r '.body // ""' <<<"$json")"
+            prerelease="$(jq -r '.prerelease' <<<"$json")"
+            asset_count="$(jq -r '.assets | length' <<<"$json")"
 
             tag_exists="false"
             release_exists="false"
 
-            # 检查目标仓库是否已有标签
             if check_tag_exists "$default_push_url" "$tag"; then
               tag_exists="true"
               echo "目标仓库已存在标签：$tag"
@@ -169,15 +319,14 @@ jobs:
               fi
             fi
 
-            # 检查目标仓库是否已有 Release
-            if GH_TOKEN="$DEFAULT_GH_TOKEN" gh release view "$tag" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            if release_exists_with_fallback "$tag"; then
               release_exists="true"
               echo "目标仓库已存在 Release：$tag"
             else
               echo "目标仓库不存在 Release：$tag"
             fi
 
-            if [ "$tag_exists" = "true" ] && [ "$release_exists" = "true" ]; then
+            if [ "$force_resync" != "true" ] && [ "$tag_exists" = "true" ] && [ "$release_exists" = "true" ]; then
               echo "标签和 Release 都已存在，跳过：$tag"
               continue
             fi
@@ -200,9 +349,13 @@ jobs:
             files=( "$asset_dir"/* )
 
             if [ "$tag_exists" = "false" ]; then
-              echo "正在同步标签到目标仓库：$tag"
+              echo "正在同步新标签：$tag"
               git fetch --force upstream "refs/tags/$tag:refs/tags/$tag"
-              push_tag_with_fallback "$tag"
+              push_tag_with_fallback "$tag" "normal"
+            elif [ "$force_resync" = "true" ]; then
+              echo "强制重新同步标签：$tag"
+              git fetch --force upstream "refs/tags/$tag:refs/tags/$tag"
+              push_tag_with_fallback "$tag" "force"
             fi
 
             if [ "$release_exists" = "false" ]; then
@@ -221,6 +374,12 @@ jobs:
                 create_args+=(--prerelease)
               fi
 
+              if [ "$tag" = "$latest_stable_tag" ] && [ "$prerelease" = "false" ]; then
+                create_args+=(--latest)
+              else
+                create_args+=(--latest=false)
+              fi
+
               if [ "${#files[@]}" -gt 0 ] && [ -e "${files[0]}" ]; then
                 echo "创建 Release 并上传附件：$tag"
                 create_release_with_fallback "${create_args[@]}" "${files[@]}"
@@ -228,9 +387,48 @@ jobs:
                 echo "创建 Release（无附件）：$tag"
                 create_release_with_fallback "${create_args[@]}"
               fi
+            else
+              if [ "$force_resync" = "true" ]; then
+                echo "强制更新 Release 标题和说明：$tag"
+                edit_release_with_fallback "$tag" "$name" "$notes_file" "$prerelease"
+
+                echo "强制同步附件：$tag"
+
+                mapfile -t current_assets < <(
+                  GH_TOKEN="${FALLBACK_GH_TOKEN:-$DEFAULT_GH_TOKEN}" gh release view "$tag" \
+                    --repo "$TARGET_REPO" \
+                    --json assets \
+                    --jq '.assets[].name'
+                )
+
+                declare -A upstream_assets=()
+                for f in "${files[@]}"; do
+                  if [ -e "$f" ]; then
+                    upstream_assets["$(basename "$f")"]=1
+                  fi
+                done
+
+                for asset_name in "${current_assets[@]:-}"; do
+                  if [[ -z "${upstream_assets[$asset_name]+x}" ]]; then
+                    echo "删除目标仓库中多余的旧附件：$asset_name"
+                    delete_asset_with_fallback "$tag" "$asset_name"
+                  fi
+                done
+
+                if [ "${#files[@]}" -gt 0 ] && [ -e "${files[0]}" ]; then
+                  upload_assets_with_fallback "$tag" "${files[@]}"
+                fi
+              else
+                echo "Release 已存在，保持不覆盖：$tag"
+              fi
             fi
 
             echo "处理完成：$tag"
           done
+
+          if [ -n "${latest_stable_tag:-}" ]; then
+            echo "正在设置首页最新版本：$latest_stable_tag"
+            set_latest_with_fallback "$latest_stable_tag"
+          fi
 
           echo "全部同步完成"
