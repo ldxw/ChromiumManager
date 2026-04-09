@@ -1,4 +1,4 @@
-name: 同步上游 Releases（已有标签补建发布）
+name: 同步上游 Releases（默认密钥优先，失败后用备用密钥）
 
 on:
   workflow_dispatch:
@@ -25,6 +25,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ github.token }}
+          persist-credentials: false
 
       - name: 配置 Git
         run: |
@@ -38,7 +40,8 @@ jobs:
 
       - name: 同步上游 Releases
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_GH_TOKEN: ${{ github.token }}
+          FALLBACK_GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -47,8 +50,64 @@ jobs:
           tmp_root="$(mktemp -d)"
           trap 'rm -rf "$tmp_root"' EXIT
 
+          default_push_url="https://x-access-token:${DEFAULT_GH_TOKEN}@github.com/${TARGET_REPO}.git"
+          fallback_push_url=""
+          if [ -n "${FALLBACK_GH_TOKEN:-}" ]; then
+            fallback_push_url="https://x-access-token:${FALLBACK_GH_TOKEN}@github.com/${TARGET_REPO}.git"
+          fi
+
+          check_tag_exists() {
+            local url="$1"
+            local tag="$2"
+            local output=""
+
+            if ! output="$(git ls-remote --tags "$url" "refs/tags/${tag}" 2>/dev/null)"; then
+              return 2
+            fi
+
+            if [ -n "$output" ]; then
+              return 0
+            fi
+
+            return 1
+          }
+
+          push_tag_with_fallback() {
+            local tag="$1"
+
+            if git push "$default_push_url" "refs/tags/${tag}:refs/tags/${tag}"; then
+              return 0
+            fi
+
+            local status=$?
+
+            if [ -n "${fallback_push_url:-}" ]; then
+              echo "默认密钥推送标签失败，改用备用密钥重试：$tag"
+              git push "$fallback_push_url" "refs/tags/${tag}:refs/tags/${tag}"
+              return $?
+            fi
+
+            return $status
+          }
+
+          create_release_with_fallback() {
+            if GH_TOKEN="$DEFAULT_GH_TOKEN" gh release create "$@"; then
+              return 0
+            fi
+
+            local status=$?
+
+            if [ -n "${FALLBACK_GH_TOKEN:-}" ]; then
+              echo "默认密钥创建 Release 失败，改用备用密钥重试：$1"
+              GH_TOKEN="$FALLBACK_GH_TOKEN" gh release create "$@"
+              return $?
+            fi
+
+            return $status
+          }
+
           mapfile -t RELEASE_ROWS < <(
-            gh api --paginate \
+            GH_TOKEN="$DEFAULT_GH_TOKEN" gh api --paginate \
               -H "Accept: application/vnd.github+json" \
               "repos/$UPSTREAM_REPO/releases?per_page=100" \
               --jq '.[] | @base64'
@@ -80,39 +139,58 @@ jobs:
             tag_exists="false"
             release_exists="false"
 
-            # 判断目标仓库是否已有同名标签
-            if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+            # 检查目标仓库是否已有标签
+            if check_tag_exists "$default_push_url" "$tag"; then
               tag_exists="true"
               echo "目标仓库已存在标签：$tag"
             else
-              echo "目标仓库不存在标签：$tag"
+              status=$?
+              if [ "$status" -eq 2 ] && [ -n "${fallback_push_url:-}" ]; then
+                echo "默认密钥检查标签失败，改用备用密钥检查：$tag"
+                if check_tag_exists "$fallback_push_url" "$tag"; then
+                  tag_exists="true"
+                  echo "目标仓库已存在标签：$tag"
+                else
+                  status=$?
+                  if [ "$status" -eq 1 ]; then
+                    echo "目标仓库不存在标签：$tag"
+                  else
+                    echo "检查标签失败：$tag"
+                    exit 1
+                  fi
+                fi
+              else
+                if [ "$status" -eq 1 ]; then
+                  echo "目标仓库不存在标签：$tag"
+                else
+                  echo "检查标签失败：$tag"
+                  exit 1
+                fi
+              fi
             fi
 
-            # 判断目标仓库是否已有同名 Release
-            if gh release view "$tag" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            # 检查目标仓库是否已有 Release
+            if GH_TOKEN="$DEFAULT_GH_TOKEN" gh release view "$tag" --repo "$TARGET_REPO" >/dev/null 2>&1; then
               release_exists="true"
               echo "目标仓库已存在 Release：$tag"
             else
               echo "目标仓库不存在 Release：$tag"
             fi
 
-            # tag 和 release 都有，直接跳过
             if [ "$tag_exists" = "true" ] && [ "$release_exists" = "true" ]; then
               echo "标签和 Release 都已存在，跳过：$tag"
               continue
             fi
 
-            # 准备发布说明
             notes_file="$tmp_root/${tag}.md"
             printf '%s' "$body" > "$notes_file"
 
-            # 下载上游附件
             asset_dir="$tmp_root/assets-$tag"
             mkdir -p "$asset_dir"
 
             if [ "$asset_count" -gt 0 ]; then
               echo "正在下载上游附件：$tag"
-              gh release download "$tag" \
+              GH_TOKEN="$DEFAULT_GH_TOKEN" gh release download "$tag" \
                 --repo "$UPSTREAM_REPO" \
                 --dir "$asset_dir"
             else
@@ -121,14 +199,12 @@ jobs:
 
             files=( "$asset_dir"/* )
 
-            # 如果 tag 不存在，先同步 tag
             if [ "$tag_exists" = "false" ]; then
               echo "正在同步标签到目标仓库：$tag"
               git fetch --force upstream "refs/tags/$tag:refs/tags/$tag"
-              git push --force origin "refs/tags/$tag:refs/tags/$tag"
+              push_tag_with_fallback "$tag"
             fi
 
-            # 如果 release 不存在，则创建 release
             if [ "$release_exists" = "false" ]; then
               echo "正在创建 Release：$tag"
 
@@ -147,10 +223,10 @@ jobs:
 
               if [ "${#files[@]}" -gt 0 ] && [ -e "${files[0]}" ]; then
                 echo "创建 Release 并上传附件：$tag"
-                gh release create "${create_args[@]}" "${files[@]}"
+                create_release_with_fallback "${create_args[@]}" "${files[@]}"
               else
                 echo "创建 Release（无附件）：$tag"
-                gh release create "${create_args[@]}"
+                create_release_with_fallback "${create_args[@]}"
               fi
             fi
 
