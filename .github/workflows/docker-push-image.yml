@@ -57,11 +57,12 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER}"
           owner_lc="$(echo "${owner}" | tr '[:upper:]' '[:lower:]')"
 
-          repo_name="${GITHUB_REPOSITORY#*/}"
-          repo_name_lc="$(echo "${repo_name}" | tr '[:upper:]' '[:lower:]')"
+          # repo_name="${GITHUB_REPOSITORY#*/}"
+          # repo_name_lc="$(echo "${repo_name}" | tr '[:upper:]' '[:lower:]')"
 
           # 镜像名默认使用当前仓库名（小写）
-          image_name="${repo_name_lc}"
+          # image_name="${repo_name_lc}"
+          image_name="chromium-manager"
 
           manual_tag_mode="false"
           if [ -n "${INPUT_RELEASE_TAG}" ]; then
@@ -88,7 +89,7 @@ jobs:
           echo "push_aliyun=${push_aliyun}" >> "$GITHUB_OUTPUT"
           echo "push_dockerhub=${push_dockerhub}" >> "$GITHUB_OUTPUT"
           echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
-          echo "repo_name_lc=${repo_name_lc}" >> "$GITHUB_OUTPUT"
+          # echo "repo_name_lc=${repo_name_lc}" >> "$GITHUB_OUTPUT"
           echo "image_name=${image_name}" >> "$GITHUB_OUTPUT"
 
       - name: 检查所需密钥
