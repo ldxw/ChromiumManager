@@ -1,0 +1,160 @@
+name: 同步上游 Releases（已有标签补建发布）
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-releases
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 同步上游发布包
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: vtumi/ChromiumManager
+      TARGET_REPO: ${{ github.repository }}
+
+    steps:
+      - name: 检出当前仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配置 Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 添加上游仓库
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+
+      - name: 同步上游 Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+
+          tmp_root="$(mktemp -d)"
+          trap 'rm -rf "$tmp_root"' EXIT
+
+          mapfile -t RELEASE_ROWS < <(
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "repos/$UPSTREAM_REPO/releases?per_page=100" \
+              --jq '.[] | @base64'
+          )
+
+          if [ "${#RELEASE_ROWS[@]}" -eq 0 ]; then
+            echo "上游仓库未找到任何 Releases：$UPSTREAM_REPO"
+            exit 0
+          fi
+
+          for row in "${RELEASE_ROWS[@]}"; do
+            json="$(printf '%s' "$row" | base64 -d)"
+
+            tag="$(jq -r '.tag_name' <<<"$json")"
+            name="$(jq -r '.name // .tag_name' <<<"$json")"
+            body="$(jq -r '.body // ""' <<<"$json")"
+            draft="$(jq -r '.draft' <<<"$json")"
+            prerelease="$(jq -r '.prerelease' <<<"$json")"
+            asset_count="$(jq -r '.assets | length' <<<"$json")"
+
+            if [ "$draft" = "true" ]; then
+              echo "跳过草稿版本：$tag"
+              continue
+            fi
+
+            echo "========================================"
+            echo "正在处理版本：$tag"
+
+            tag_exists="false"
+            release_exists="false"
+
+            # 判断目标仓库是否已有同名标签
+            if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+              tag_exists="true"
+              echo "目标仓库已存在标签：$tag"
+            else
+              echo "目标仓库不存在标签：$tag"
+            fi
+
+            # 判断目标仓库是否已有同名 Release
+            if gh release view "$tag" --repo "$TARGET_REPO" >/dev/null 2>&1; then
+              release_exists="true"
+              echo "目标仓库已存在 Release：$tag"
+            else
+              echo "目标仓库不存在 Release：$tag"
+            fi
+
+            # tag 和 release 都有，直接跳过
+            if [ "$tag_exists" = "true" ] && [ "$release_exists" = "true" ]; then
+              echo "标签和 Release 都已存在，跳过：$tag"
+              continue
+            fi
+
+            # 准备发布说明
+            notes_file="$tmp_root/${tag}.md"
+            printf '%s' "$body" > "$notes_file"
+
+            # 下载上游附件
+            asset_dir="$tmp_root/assets-$tag"
+            mkdir -p "$asset_dir"
+
+            if [ "$asset_count" -gt 0 ]; then
+              echo "正在下载上游附件：$tag"
+              gh release download "$tag" \
+                --repo "$UPSTREAM_REPO" \
+                --dir "$asset_dir"
+            else
+              echo "该版本没有附件：$tag"
+            fi
+
+            files=( "$asset_dir"/* )
+
+            # 如果 tag 不存在，先同步 tag
+            if [ "$tag_exists" = "false" ]; then
+              echo "正在同步标签到目标仓库：$tag"
+              git fetch --force upstream "refs/tags/$tag:refs/tags/$tag"
+              git push --force origin "refs/tags/$tag:refs/tags/$tag"
+            fi
+
+            # 如果 release 不存在，则创建 release
+            if [ "$release_exists" = "false" ]; then
+              echo "正在创建 Release：$tag"
+
+              create_args=(
+                "$tag"
+                --repo "$TARGET_REPO"
+                --title "$name"
+                --notes-file "$notes_file"
+                --draft=false
+                --verify-tag
+              )
+
+              if [ "$prerelease" = "true" ]; then
+                create_args+=(--prerelease)
+              fi
+
+              if [ "${#files[@]}" -gt 0 ] && [ -e "${files[0]}" ]; then
+                echo "创建 Release 并上传附件：$tag"
+                gh release create "${create_args[@]}" "${files[@]}"
+              else
+                echo "创建 Release（无附件）：$tag"
+                gh release create "${create_args[@]}"
+              fi
+            fi
+
+            echo "处理完成：$tag"
+          done
+
+          echo "全部同步完成"
