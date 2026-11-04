@@ -5,12 +5,17 @@ on:
   workflow_call:
     inputs:
       release_tag:
-        description: '要构建的 Release 标签，留空则自动使用当前仓库最新正式 Release'
+        description: '二进制来源的 Release 标签，留空则按 ref 自动选择'
+        required: false
+        type: string
+        default: ''
+      image_tag:
+        description: '镜像标签，留空则 tag 触发用该 tag、分支触发用分支名'
         required: false
         type: string
         default: ''
       tag_latest:
-        description: '指定 release_tag 时是否同时推送 latest 标签'
+        description: '是否同时推送 latest 标签（分支构建默认关闭）'
         required: false
         type: boolean
         default: false
@@ -45,12 +50,17 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: '要构建的 Release 标签，留空则自动使用当前仓库最新正式 Release，例如：v1.0.3'
+        description: '二进制来源的 Release 标签，留空则按 ref 自动选择'
+        required: false
+        type: string
+        default: ''
+      image_tag:
+        description: '镜像标签，留空则 tag 触发用该 tag、分支触发用分支名'
         required: false
         type: string
         default: ''
       tag_latest:
-        description: '手动指定标签时是否同时推送 latest（留空自动模式下总是推送 latest）'
+        description: '是否同时推送 latest（分支触发默认不推，避免覆盖正式镜像）'
         required: false
         type: boolean
         default: false
@@ -75,7 +85,8 @@ permissions:
   packages: write
 
 concurrency:
-  group: docker-image-build
+  # 按 ref 分组，分支构建与 tag 构建互不排队
+  group: docker-image-build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -91,10 +102,13 @@ jobs:
         id: prep
         env:
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
           INPUT_TAG_LATEST: ${{ inputs.tag_latest }}
           INPUT_PUSH_GHCR: ${{ inputs.push_ghcr }}
           INPUT_PUSH_ALIYUN: ${{ inputs.push_aliyun }}
           INPUT_PUSH_DOCKERHUB: ${{ inputs.push_dockerhub }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
@@ -105,16 +119,42 @@ jobs:
           owner_lc="$(echo "${owner}" | tr '[:upper:]' '[:lower:]')"
           image_name="chromium-manager"
 
+          # Docker 标签只允许 [A-Za-z0-9_.-]，分支名里的 / 需要转成 -
+          sanitize_tag() {
+            printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[-.]+//; s/[-.]+$//' \
+              | cut -c1-128
+          }
+
+          # 二进制来源：显式指定 > tag 触发用该 tag > 否则取最新正式 Release
           if [ -n "${INPUT_RELEASE_TAG}" ]; then
             release_tag="${INPUT_RELEASE_TAG}"
-            echo "使用手动指定的 Release 标签：${release_tag}"
+            echo "使用手动指定的二进制来源 Release：${release_tag}"
+          elif [ "${REF_TYPE}" = "tag" ]; then
+            release_tag="${REF_NAME}"
+            echo "tag 触发，二进制来源使用当前 tag：${release_tag}"
           else
             release_tag="$(gh api "repos/${repo}/releases/latest" --jq '.tag_name')"
-            echo "未填写 Release 标签，自动使用最新正式 Release：${release_tag}"
+            echo "分支触发，二进制来源自动使用最新正式 Release：${release_tag}"
           fi
 
           if [ -z "${release_tag}" ] || [ "${release_tag}" = "null" ]; then
-            echo "无法确定 Release 标签，请确认仓库存在正式 Release 或手动填写"
+            echo "无法确定 Release 标签，请确认仓库存在正式 Release 或手动指定 release_tag"
+            exit 1
+          fi
+
+          # 镜像标签：显式指定 > tag 触发用该 tag > 分支触发用分支名
+          if [ -n "${INPUT_IMAGE_TAG}" ]; then
+            image_tag="$(sanitize_tag "${INPUT_IMAGE_TAG}")"
+            echo "使用手动指定的镜像标签：${image_tag}"
+          else
+            image_tag="$(sanitize_tag "${REF_NAME}")"
+            echo "${REF_TYPE} 触发，镜像标签取自 ref 名：${image_tag}"
+          fi
+
+          if [ -z "${image_tag}" ]; then
+            echo "镜像标签为空，请检查分支名或手动指定 image_tag"
             exit 1
           fi
 
@@ -127,17 +167,19 @@ jobs:
             exit 1
           fi
 
-          # 自动取最新 Release 时总是打 latest；手动指定标签时仅当勾选 tag_latest 才打
-          if [ -z "${INPUT_RELEASE_TAG}" ]; then
+          # tag 触发等同正式发布，默认也推 latest；分支构建只推分支标签，不覆盖正式镜像
+          if [ "${REF_TYPE}" = "tag" ]; then
+            tag_latest="true"
+          elif [ "${INPUT_TAG_LATEST}" = "true" ]; then
             tag_latest="true"
           else
-            tag_latest="${INPUT_TAG_LATEST}"
-            if [ "${tag_latest}" != "true" ]; then
-              tag_latest="false"
-            fi
+            tag_latest="false"
           fi
 
+          echo "镜像标签：${image_tag}，二进制来源：${release_tag}，latest：${tag_latest}"
+
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
           echo "tag_latest=${tag_latest}" >> "$GITHUB_OUTPUT"
           echo "push_ghcr=${push_ghcr}" >> "$GITHUB_OUTPUT"
           echo "push_aliyun=${push_aliyun}" >> "$GITHUB_OUTPUT"
@@ -182,6 +224,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           echo "开始下载 Release 附件：${RELEASE_TAG}"
+
           gh release download "${RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern 'ungoogled-chromium-*_linux.tar.gz' \
@@ -219,7 +262,7 @@ jobs:
       - name: 生成镜像标签
         id: tags
         env:
-          RELEASE_TAG: ${{ steps.prep.outputs.release_tag }}
+          IMAGE_TAG: ${{ steps.prep.outputs.image_tag }}
           TAG_LATEST: ${{ steps.prep.outputs.tag_latest }}
           PUSH_GHCR: ${{ steps.prep.outputs.push_ghcr }}
           PUSH_ALIYUN: ${{ steps.prep.outputs.push_aliyun }}
@@ -243,21 +286,21 @@ jobs:
           }
 
           if [ "${PUSH_GHCR}" = "true" ]; then
-            add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${RELEASE_TAG}"
+            add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${IMAGE_TAG}"
             if [ "${TAG_LATEST}" = "true" ]; then
               add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:latest"
             fi
           fi
 
           if [ "${PUSH_ALIYUN}" = "true" ]; then
-            add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:${RELEASE_TAG}"
+            add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
             if [ "${TAG_LATEST}" = "true" ]; then
               add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:latest"
             fi
           fi
 
           if [ "${PUSH_DOCKERHUB}" = "true" ]; then
-            add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${RELEASE_TAG}"
+            add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
             if [ "${TAG_LATEST}" = "true" ]; then
               add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
             fi
@@ -290,4 +333,5 @@ jobs:
             org.opencontainers.image.title=${{ steps.prep.outputs.image_name }}
             org.opencontainers.image.description=ChromiumManager container image
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.prep.outputs.release_tag }}
+            org.opencontainers.image.version=${{ steps.prep.outputs.image_tag }}
+            org.opencontainers.image.revision=${{ github.sha }}

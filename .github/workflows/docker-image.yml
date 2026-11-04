@@ -3,6 +3,21 @@ name: Docker Image CI
 on:
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: '二进制来源的 Release 标签，留空则自动使用最新正式 Release'
+        required: false
+        type: string
+        default: ''
+      image_tag:
+        description: '镜像标签，留空则 tag 触发用该 tag、分支触发用分支名'
+        required: false
+        type: string
+        default: ''
+      tag_latest:
+        description: '是否同时推送 latest（分支触发默认不推）'
+        required: false
+        type: boolean
+        default: false
       push_ghcr:
         description: '推送到 GHCR'
         required: false
@@ -23,13 +38,19 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  # 按 ref 分组，分支构建不会挤占 tag / 主干的构建队列
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # 复用主构建流程，按当前 ref 对应的 Release 附件构建，并同时打 latest
+  # 复用主构建流程：二进制默认取最新 Release，镜像标签跟随当前 ref
   docker:
     uses: ./.github/workflows/docker-push-image.yml
     with:
-      release_tag: ${{ github.ref_name }}
-      tag_latest: true
+      release_tag: ${{ inputs.release_tag }}
+      image_tag: ${{ inputs.image_tag }}
+      tag_latest: ${{ inputs.tag_latest }}
       push_ghcr: ${{ inputs.push_ghcr }}
       push_aliyun: ${{ inputs.push_aliyun }}
       push_dockerhub: ${{ inputs.push_dockerhub }}
