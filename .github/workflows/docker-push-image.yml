@@ -10,12 +10,12 @@ on:
         type: string
         default: ''
       image_tag:
-        description: '镜像标签，留空则 tag 触发用该 tag、分支触发用分支名'
+        description: '镜像标签，留空则跟随二进制来源的 Release 标签'
         required: false
         type: string
         default: ''
       tag_latest:
-        description: '是否同时推送 latest 标签（分支构建默认关闭）'
+        description: '是否同时推送 latest 标签（默认关闭）'
         required: false
         type: boolean
         default: false
@@ -28,7 +28,7 @@ on:
         description: '推送到阿里云镜像仓库'
         required: false
         type: boolean
-        default: true
+        default: false
       push_dockerhub:
         description: '推送到 Docker Hub'
         required: false
@@ -55,12 +55,12 @@ on:
         type: string
         default: ''
       image_tag:
-        description: '镜像标签，留空则 tag 触发用该 tag、分支触发用分支名'
+        description: '镜像标签，留空则跟随二进制来源的 Release 标签'
         required: false
         type: string
         default: ''
       tag_latest:
-        description: '是否同时推送 latest（分支触发默认不推，避免覆盖正式镜像）'
+        description: '是否同时推送 latest（默认关闭，避免覆盖正式镜像）'
         required: false
         type: boolean
         default: false
@@ -73,7 +73,7 @@ on:
         description: '推送到阿里云镜像仓库'
         required: false
         type: boolean
-        default: true
+        default: false
       push_dockerhub:
         description: '推送到 Docker Hub'
         required: false
@@ -144,17 +144,18 @@ jobs:
             exit 1
           fi
 
-          # 镜像标签：显式指定 > tag 触发用该 tag > 分支触发用分支名
+          # 镜像标签：显式指定 > 跟随二进制来源的 Release 标签
+          # 与二进制版本对齐，避免手动运行时推出一堆 main 标签
           if [ -n "${INPUT_IMAGE_TAG}" ]; then
             image_tag="$(sanitize_tag "${INPUT_IMAGE_TAG}")"
             echo "使用手动指定的镜像标签：${image_tag}"
           else
-            image_tag="$(sanitize_tag "${REF_NAME}")"
-            echo "${REF_TYPE} 触发，镜像标签取自 ref 名：${image_tag}"
+            image_tag="$(sanitize_tag "${release_tag}")"
+            echo "镜像标签跟随二进制来源：${image_tag}"
           fi
 
           if [ -z "${image_tag}" ]; then
-            echo "镜像标签为空，请检查分支名或手动指定 image_tag"
+            echo "镜像标签为空，请检查 Release 标签或手动指定 image_tag"
             exit 1
           fi
 
