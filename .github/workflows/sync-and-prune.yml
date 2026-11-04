@@ -57,7 +57,7 @@ jobs:
           done
           echo "两个架构的 .tar.xz 均在，可以删除旧附件"
 
-      - name: 删除非 .tar.xz 附件
+      - name: 删除旧的 .tar.gz 附件
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -70,7 +70,8 @@ jobs:
           while IFS= read -r name; do
             [ -n "${name}" ] || continue
             case "${name}" in
-              *_linux.tar.xz) echo "保留：${name}"; continue ;;
+              *_linux.tar.gz) ;;
+              *) echo "保留：${name}"; continue ;;
             esac
             echo "删除：${name}"
             if ! gh release delete-asset "${TARGET_TAG}" "${name}" \
