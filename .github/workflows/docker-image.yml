@@ -2,40 +2,35 @@ name: Docker Image CI
 
 on:
   workflow_dispatch:
+    inputs:
+      push_ghcr:
+        description: '推送到 GHCR'
+        required: false
+        type: boolean
+        default: false
+      push_aliyun:
+        description: '推送到阿里云镜像仓库'
+        required: false
+        type: boolean
+        default: false
+      push_dockerhub:
+        description: '推送到 Docker Hub'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
+  # 复用主构建流程，按当前 ref 对应的 Release 附件构建，并同时打 latest
   docker:
-    runs-on: ubuntu-latest
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v5
-      -
-        name: Download chromium binary from release
-        uses: robinraju/release-downloader@v1
-        with:
-          tag: ${{ github.ref_name }}
-          fileName: 'ungoogled-chromium-*_linux.tar.gz'
-          out-file-path: .
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-      -
-        name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-      -
-        name: Login to DockerHub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      -
-        name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/chromium-manager:${{ github.ref_name }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/chromium-manager:latest
+    uses: ./.github/workflows/docker-push-image.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+      tag_latest: true
+      push_ghcr: ${{ inputs.push_ghcr }}
+      push_aliyun: ${{ inputs.push_aliyun }}
+      push_dockerhub: ${{ inputs.push_dockerhub }}
+    secrets: inherit

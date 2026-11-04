@@ -5,8 +5,11 @@
     "build": "vite build",
     "serve": "vite preview",
     "lint:all": "npm run lint:prettier && npm run lint:eslint",
+    "lint:check": "npm run lint:prettier:check && npm run lint:eslint:check",
     "lint:eslint": "eslint \"{src,mock}/**/*.{vue,ts,js,tsx}\" --fix",
-    "lint:prettier": "prettier --write --loglevel warn \"src/**/*.{ts,js,json,tsx,jsx,css,less,scss,vue,html,md}\""
+    "lint:eslint:check": "eslint \"{src,mock}/**/*.{vue,ts,js,tsx}\"",
+    "lint:prettier": "prettier --write --loglevel warn \"src/**/*.{ts,js,json,tsx,jsx,css,less,scss,vue,html,md}\"",
+    "lint:prettier:check": "prettier --check \"src/**/*.{ts,js,json,tsx,jsx,css,less,scss,vue,html,md}\""
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
