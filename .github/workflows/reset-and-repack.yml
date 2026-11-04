@@ -31,17 +31,18 @@ jobs:
 
           mapfile -t tags < <(
             gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 \
-              --json tagName --jq '.[].tagName'
+              --json tagName --jq '.[].tagName' || true
           )
 
-          if [ "${#tags[@]}" -eq 0 ]; then
-            echo "没有需要删除的 Release"
-          fi
+          echo "待删除 Release：${#tags[@]} 个"
 
+          # 重复运行或 tag 已被 --cleanup-tag 带走时 gh 会返回非零，
+          # 这里逐条容错，避免一次 404 让整个作业失败、连带跳过 repack
           for tag in "${tags[@]:-}"; do
             [ -n "${tag}" ] || continue
             echo "删除 Release 与关联 tag：${tag}"
-            gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
+            gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag \
+              || echo "删除失败，继续：${tag}"
           done
 
       - name: 清理残留 tag
@@ -59,7 +60,8 @@ jobs:
           for ref in "${refs[@]:-}"; do
             [ -n "${ref}" ] || continue
             echo "删除残留 tag：${ref}"
-            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/${ref}"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/${ref}" \
+              || echo "删除失败，继续：${ref}"
           done
 
           echo "剩余 Release："
