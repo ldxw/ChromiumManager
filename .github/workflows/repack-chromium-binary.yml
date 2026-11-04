@@ -1,6 +1,24 @@
 name: 从上游重打包 Chromium 二进制
 
 on:
+  # 供 reset-and-repack.yml 复用；输入与手动触发保持一致
+  workflow_call:
+    inputs:
+      upstream_tag:
+        description: '上游 portablelinux 的 Release 标签，留空则取最新正式 Release'
+        required: false
+        type: string
+        default: ''
+      release_tag:
+        description: '本仓库的 Release 标签，留空则沿用上游标签'
+        required: false
+        type: string
+        default: ''
+      update_latest:
+        description: '是否把该 Release 标记为 latest'
+        required: false
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       upstream_tag:

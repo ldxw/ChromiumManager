@@ -1,0 +1,77 @@
+name: 重置产物并重打包
+
+# 一次性流程：清空本仓库所有 Release 与 tag，再从上游重新重打包
+# 只在自身文件被推送时触发，用完即删
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/reset-and-repack.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reset-and-repack
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    name: 删除 Release 与 tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: 删除所有 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mapfile -t tags < <(
+            gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 \
+              --json tagName --jq '.[].tagName'
+          )
+
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "没有需要删除的 Release"
+          fi
+
+          for tag in "${tags[@]:-}"; do
+            [ -n "${tag}" ] || continue
+            echo "删除 Release 与关联 tag：${tag}"
+            gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
+          done
+
+      - name: 清理残留 tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mapfile -t refs < <(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/git/refs/tags" \
+              --jq '.[].ref' 2>/dev/null || true
+          )
+
+          for ref in "${refs[@]:-}"; do
+            [ -n "${ref}" ] || continue
+            echo "删除残留 tag：${ref}"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/${ref}"
+          done
+
+          echo "剩余 Release："
+          gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 || echo "（空）"
+
+  repack:
+    name: 从上游重打包
+    needs: reset
+    permissions:
+      contents: write
+    uses: ./.github/workflows/repack-chromium-binary.yml
+    with:
+      upstream_tag: ''
+      release_tag: ''
+      update_latest: true
