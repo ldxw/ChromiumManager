@@ -8,8 +8,8 @@ on:
         required: false
         type: boolean
         default: false
-  schedule:
-    - cron: "15 */6 * * *"
+  # 不再定时同步：中转仓库的产物是旧版本且沿用已废弃的 ungoogled- 命名，
+  # 定时跑会把 reset-and-repack 刚清掉的附件重新搬回来。需要时手动触发。
 
 permissions:
   contents: write
