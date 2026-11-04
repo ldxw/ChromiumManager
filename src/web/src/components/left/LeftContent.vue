@@ -8,7 +8,7 @@
             :class="{ active: item._id === activeGroupId }"
             @click="onItemClick(item)"
           >
-            <div class="name">{{ item.name }}</div>
+            <div class="name" :title="item.name">{{ item.name }}</div>
             <div v-if="item._id !== 'all'" class="action">
               <el-icon @click.stop="onEditClick(item)"><EditPen /></el-icon>
               <el-icon @click.stop="onDeleteClick(item)"><Delete /></el-icon>
@@ -20,7 +20,8 @@
     <el-dialog
       v-model="formDialog"
       :title="model.form._id ? '编辑分组' : '添加分组'"
-      :width="650"
+      width="650"
+      class="responsive-dialog"
       :before-close="onFormCancel"
     >
       <el-form
@@ -32,12 +33,12 @@
         size="default"
       >
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="名称" prop="name">
               <el-input v-model="model.form.name"></el-input>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="排序" prop="sort">
               <el-input-number
                 v-model="model.form.sort"
@@ -65,6 +66,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { getGroups, addGroup, updateGroup, deleteGroup } from '@/api'
 import { validateForm } from '@/utils/common'
+
+const emit = defineEmits(['select'])
 
 const formRef = ref(null)
 const formDialog = ref(false)
@@ -144,6 +147,7 @@ const onFormConfirm = async () => {
 }
 const onItemClick = (item) => {
   updateActiveGroupId(item._id)
+  emit('select', item)
 }
 const onEditClick = (item) => {
   model.form = { ...item }
@@ -210,7 +214,8 @@ defineExpose({
       }
 
       .name {
-        width: 232px;
+        width: 100%;
+        padding-right: 64px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;

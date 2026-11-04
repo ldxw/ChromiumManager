@@ -9,12 +9,42 @@
         class="table"
         @row-click="onItemClick"
       >
-        <el-table-column prop="name" label="名称" width="auto" class-name="left"></el-table-column>
-        <el-table-column prop="proxyName" label="代理" width="auto"></el-table-column>
-        <el-table-column prop="ip" label="IP" width="120"></el-table-column>
-        <el-table-column prop="lang" label="语言" width="80"></el-table-column>
-        <el-table-column prop="timezone" label="时区" width="140"></el-table-column>
-        <el-table-column label="位置" width="60" align="center">
+        <el-table-column
+          prop="name"
+          label="名称"
+          min-width="120"
+          class-name="left"
+          show-overflow-tooltip
+        ></el-table-column>
+        <el-table-column
+          v-if="!isMobile"
+          prop="proxyName"
+          label="代理"
+          min-width="100"
+          show-overflow-tooltip
+        ></el-table-column>
+        <el-table-column
+          v-if="!isTablet"
+          prop="ip"
+          label="IP"
+          width="130"
+          show-overflow-tooltip
+        ></el-table-column>
+        <el-table-column
+          v-if="!isCompact"
+          prop="lang"
+          label="语言"
+          width="90"
+          show-overflow-tooltip
+        ></el-table-column>
+        <el-table-column
+          v-if="!isCompact"
+          prop="timezone"
+          label="时区"
+          width="150"
+          show-overflow-tooltip
+        ></el-table-column>
+        <el-table-column v-if="!isMobile" label="位置" width="64" align="center">
           <template #default="scope">
             <el-icon
               v-if="scope.row.location"
@@ -25,7 +55,7 @@
             </el-icon>
           </template>
         </el-table-column>
-        <el-table-column label="Cookie" width="80" align="center">
+        <el-table-column label="Cookie" :width="isMobile ? 64 : 80" align="center">
           <template #default="scope">
             <el-icon
               :class="['cookie-icon', { disabled: runningSet.has(scope.row._id) }]"
@@ -41,7 +71,11 @@
             </el-icon>
           </template>
         </el-table-column>
-        <el-table-column fixed="right" label="操作" width="200">
+        <el-table-column
+          :fixed="isMobile ? false : 'right'"
+          label="操作"
+          :width="isMobile ? 152 : 200"
+        >
           <template #default="scope">
             <template v-if="runningSet.has(scope.row._id)">
               <el-button type="success" size="small" @click.stop="onShowClick(scope.row)">
@@ -80,7 +114,8 @@
     <el-dialog
       v-model="formDialog"
       :title="model.form._id ? '编辑配置' : '添加配置'"
-      :width="800"
+      width="800"
+      class="responsive-dialog"
       :before-close="onFormCancel"
     >
       <el-form
@@ -92,12 +127,12 @@
         size="default"
       >
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="名称" prop="name">
               <el-input v-model="model.form.name" placeholder="请输入名称"></el-input>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="分组" prop="groupId">
               <el-select v-model="model.form.groupId" filterable>
                 <template v-for="item in model.group" :key="item._id">
@@ -108,7 +143,7 @@
           </el-col>
         </el-row>
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="代理" prop="proxy" class="input-picker">
               <el-input
                 :model-value="formProxyName"
@@ -130,7 +165,7 @@
               </el-input>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="排序" prop="sort">
               <el-input-number
                 v-model="model.form.sort"
@@ -174,7 +209,7 @@
         </el-row>
 
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="操作系统">
               <el-select v-model="model.form.fp.platform" clearable placeholder="请选择操作系统">
                 <el-option label="Windows" value="windows"></el-option>
@@ -183,7 +218,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="浏览器品牌">
               <el-select v-model="model.form.fp.brand" clearable placeholder="请选择浏览器品牌">
                 <el-option label="Chrome" value="Chrome"></el-option>
@@ -196,7 +231,7 @@
         </el-row>
 
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="设备核心">
               <el-select
                 v-model="model.form.fp.hardwareConcurrency"
@@ -216,7 +251,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="设备内存">
               <el-select
                 v-model="model.form.fp.deviceMemory"
@@ -232,14 +267,14 @@
         </el-row>
 
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="屏幕尺寸">
               <el-select v-model="model.form.fp.screen" clearable placeholder="请选择屏幕尺寸">
                 <el-option v-for="s in screens" :key="s" :label="s" :value="s"></el-option>
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="位置">
               <el-input
                 v-model="model.form.fp.location"
@@ -257,7 +292,7 @@
         </el-row>
 
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="语言">
               <el-select
                 v-model="model.form.fp.lang"
@@ -275,7 +310,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="时区">
               <el-select
                 v-model="model.form.fp.timezone"
@@ -334,7 +369,7 @@
 
     <ProxyManagement v-model="proxyManageVisible" @change="fetchProxies" @select="onProxySelect" />
 
-    <el-dialog v-model="cookieDialog" title="导入Cookie" :width="600">
+    <el-dialog v-model="cookieDialog" title="导入Cookie" width="600" class="responsive-dialog">
       <el-form ref="cookieFormRef" :model="cookieForm" :rules="cookieRules">
         <el-form-item prop="text">
           <el-input
@@ -385,7 +420,10 @@ import {
 } from '@/api'
 import { validateForm } from '@/utils/common'
 import { languages, timezones, screens, BASE_URL } from '@/utils/constants'
+import { useBreakpoint } from '@/utils/useBreakpoint'
 import ProxyManagement from './ProxyManagement.vue'
+
+const { isMobile, isTablet, isCompact } = useBreakpoint()
 
 const activeGroupId = inject('activeGroupId')
 const device = inject('device')
@@ -452,6 +490,7 @@ let runningEventSource = null
 
 onMounted(() => {
   window.addEventListener('resize', resize)
+  nextTick(() => resize())
   runningEventSource = new EventSource(`${BASE_URL}/events`)
   runningEventSource.onmessage = (e) => {
     try {
@@ -479,7 +518,9 @@ watch(activeGroupId, (newVal) => {
 })
 
 const getPageSize = () => {
-  return Math.floor((listRef.value.offsetHeight - 40) / 41.38)
+  const h = listRef.value?.offsetHeight || 0
+  const size = Math.floor((h - 40) / 41.38)
+  return size > 0 ? size : 5
 }
 
 const proxyMap = computed(() => new Map(proxies.value.map((p) => [p._id, p])))
@@ -795,6 +836,12 @@ defineExpose({
   }
 }
 
+@media (max-width: 767px) {
+  .right .content .list .table .left .cell {
+    padding-left: 8px;
+  }
+}
+
 .delete-item {
   color: #f56c6c !important;
 }
@@ -803,11 +850,15 @@ defineExpose({
 <style lang="scss" scoped>
 .content {
   width: 100%;
-  height: calc(100% - 60px);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 
   .list {
     width: 100%;
-    height: calc(100% - 52px);
+    flex: 1;
+    min-height: 0;
     overflow: hidden;
 
     .table {
@@ -821,10 +872,36 @@ defineExpose({
 
   .pagination {
     padding: 10px;
+    flex: 0 0 auto;
 
     .el-pagination {
       justify-content: center;
+      flex-wrap: wrap;
+      row-gap: 6px;
     }
+  }
+}
+
+@media (max-width: 767px) {
+  .content .pagination {
+    padding: 8px 4px;
+  }
+
+  .content .list .table :deep(.el-table__cell) {
+    padding: 6px 0;
+  }
+
+  .content .list .table :deep(.el-table__cell .cell) {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .content .list .table :deep(.el-button + .el-button) {
+    margin-left: 4px;
+  }
+
+  .content .list .table :deep(.el-button) {
+    padding: 5px 8px;
   }
 }
 
@@ -833,8 +910,18 @@ defineExpose({
 }
 
 .switches-row {
+  flex-wrap: wrap;
+
   :deep(.el-col) {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 150px;
+  }
+}
+
+@media (max-width: 767px) {
+  .switches-row :deep(.el-col) {
+    flex: 1 1 45%;
+    min-width: 0;
   }
 }
 </style>

@@ -193,8 +193,9 @@ onUnmounted(() => {
 .map-picker-dialog {
   background: #fff;
   border-radius: 4px;
-  width: 800px;
-  max-width: 90vw;
+  width: min(800px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
 }
 .map-picker-header {
@@ -230,12 +231,34 @@ onUnmounted(() => {
   position: absolute;
   top: 30px;
   left: 30px;
+  right: 30px;
   z-index: 1000;
   width: 280px;
+  max-width: calc(100% - 60px);
 }
 .map-picker-map {
   width: 100%;
-  height: 475px;
+  height: min(475px, 60vh);
+  min-height: 240px;
   border-radius: 4px;
+}
+
+@media (max-width: 767px) {
+  .map-picker-header {
+    padding: 14px 14px 8px;
+  }
+  .map-picker-title {
+    font-size: 16px;
+  }
+  .map-picker-body {
+    padding: 12px;
+  }
+  .map-picker-search {
+    top: 20px;
+    left: 20px;
+    right: 20px;
+    width: auto;
+    max-width: none;
+  }
 }
 </style>

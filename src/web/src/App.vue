@@ -17,6 +17,17 @@ import MapPicker from './components/MapPicker.vue'
 
 const locale = zhCn
 
+const groupDrawerVisible = ref(false)
+const openGroupDrawer = () => {
+  groupDrawerVisible.value = true
+}
+const closeGroupDrawer = () => {
+  groupDrawerVisible.value = false
+}
+provide('groupDrawerVisible', groupDrawerVisible)
+provide('openGroupDrawer', openGroupDrawer)
+provide('closeGroupDrawer', closeGroupDrawer)
+
 let activeGroupId = ref(null)
 const updateActiveGroupId = (value) => {
   activeGroupId.value = value

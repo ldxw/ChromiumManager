@@ -1,5 +1,11 @@
 <template>
-  <el-dialog v-model="visible" title="代理列表" :width="800" :before-close="handleClose">
+  <el-dialog
+    v-model="visible"
+    title="代理列表"
+    width="800"
+    class="responsive-dialog"
+    :before-close="handleClose"
+  >
     <div class="proxy-header">
       <el-input
         v-model="keyword"
@@ -31,20 +37,28 @@
           width="auto"
           show-overflow-tooltip
         ></el-table-column>
-        <el-table-column prop="ip" label="IP" width="120" show-overflow-tooltip></el-table-column>
         <el-table-column
+          v-if="!isTablet"
+          prop="ip"
+          label="IP"
+          width="120"
+          show-overflow-tooltip
+        ></el-table-column>
+        <el-table-column
+          v-if="!isCompact"
           prop="lang"
           label="语言"
           width="80"
           show-overflow-tooltip
         ></el-table-column>
         <el-table-column
+          v-if="!isCompact"
           prop="timezone"
           label="时区"
           width="140"
           show-overflow-tooltip
         ></el-table-column>
-        <el-table-column label="位置" width="60" align="center">
+        <el-table-column v-if="!isMobile" label="位置" width="60" align="center">
           <template #default="scope">
             <el-icon
               v-if="scope.row.location"
@@ -55,7 +69,11 @@
             </el-icon>
           </template>
         </el-table-column>
-        <el-table-column fixed="right" label="操作" width="150">
+        <el-table-column
+          :fixed="isMobile ? false : 'right'"
+          label="操作"
+          :width="isMobile ? 132 : 150"
+        >
           <template #default="scope">
             <el-button size="small" @click.stop="onEditClick(scope.row)">编辑</el-button>
             <el-button size="small" class="delete" @click.stop="onDeleteClick(scope.row)">
@@ -82,25 +100,26 @@
     <el-dialog
       v-model="formDialog"
       :title="form._id ? '编辑代理' : '添加代理'"
-      :width="650"
+      width="650"
+      class="responsive-dialog"
       append-to-body
       :before-close="onFormCancel"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-width="auto">
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="代理名称" prop="name">
               <el-input v-model="form.name" placeholder="请输入代理名称"></el-input>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="代理地址" prop="url">
               <el-input v-model="form.url" placeholder="请输入代理地址"></el-input>
             </el-form-item>
           </el-col>
         </el-row>
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="语言">
               <el-select
                 v-model="form.lang"
@@ -118,7 +137,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="时区">
               <el-select
                 v-model="form.timezone"
@@ -134,7 +153,7 @@
           </el-col>
         </el-row>
         <el-row :gutter="20">
-          <el-col :span="12">
+          <el-col :xs="24" :sm="12">
             <el-form-item label="位置" prop="location">
               <el-input
                 v-model="form.location"
@@ -168,6 +187,9 @@ import { getProxies, getProxy, addProxy, updateProxy, deleteProxy } from '@/api'
 import { languages, timezones } from '@/utils/constants'
 import { openMapPicker, viewMapLocation } from '@/utils/mapPicker'
 import { Location } from '@element-plus/icons-vue'
+import { useBreakpoint } from '@/utils/useBreakpoint'
+
+const { isMobile, isTablet, isCompact } = useBreakpoint()
 
 const props = defineProps({
   modelValue: {
@@ -343,23 +365,54 @@ const onDeleteClick = (row) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .proxy-search {
   width: 260px;
+  max-width: 100%;
+  min-width: 0;
+  flex: 1 1 220px;
 }
 .proxy-table-wrap {
-  height: 386px;
+  height: min(386px, 46vh);
+  margin-top: 15px;
+  overflow: hidden;
 }
 .proxy-table {
   width: 100%;
   height: 100%;
-  padding-top: 15px;
 }
 .proxy-pagination {
   padding: 15px 0 20px;
   justify-content: center;
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 .delete {
   color: $red-color;
+}
+
+@media (max-width: 767px) {
+  .proxy-header {
+    flex-wrap: wrap;
+
+    .el-button {
+      width: 100%;
+    }
+  }
+
+  .proxy-search {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  .proxy-table-wrap {
+    height: min(386px, 40vh);
+  }
+
+  .proxy-pagination {
+    padding: 10px 0 14px;
+  }
 }
 </style>
