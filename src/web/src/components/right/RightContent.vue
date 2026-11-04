@@ -2,6 +2,7 @@
   <div class="content">
     <div ref="listRef" class="list">
       <el-table
+        ref="tableRef"
         :data="listView"
         highlight-current-row
         stripe
@@ -43,7 +44,7 @@
         <el-table-column fixed="right" label="操作" width="200">
           <template #default="scope">
             <template v-if="runningSet.has(scope.row._id)">
-              <el-button type="primary" size="small" @click.stop="onShowClick(scope.row)">
+              <el-button type="success" size="small" @click.stop="onShowClick(scope.row)">
                 激活
               </el-button>
               <el-button type="danger" size="small" @click.stop="onStopClick(scope.row)">
@@ -239,16 +240,18 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="位置" class="input-picker">
+            <el-form-item label="位置">
               <el-input
                 v-model="model.form.fp.location"
                 :disabled="model.form.fp.proxyLocation"
-                placeholder="请选择位置"
-                clearable
-                class="input-picker"
-                @click="onPickFpLocation"
-                @keydown.prevent
-              ></el-input>
+                placeholder="请输入或选择位置"
+              >
+                <template #suffix>
+                  <el-icon class="location-pick-icon" @click.stop="onPickFpLocation">
+                    <Location />
+                  </el-icon>
+                </template>
+              </el-input>
             </el-form-item>
           </el-col>
         </el-row>
@@ -388,29 +391,38 @@ const activeGroupId = inject('activeGroupId')
 const device = inject('device')
 const proxies = inject('proxies')
 const fetchProxies = inject('fetchProxies')
-const updateDeviceInfo = inject('updateDeviceInfo')
 
 const listRef = ref(null)
+const tableRef = ref(null)
 const formRef = ref(null)
 const formDialog = ref(false)
 const runningSet = ref(new Set())
 const proxyManageVisible = ref(false)
+const selectedRow = ref(null)
+
 const cookieDialog = ref(false)
 const cookieImportRow = ref(null)
 const cookieFormRef = ref(null)
 const cookieForm = reactive({ text: '' })
 const cookieRules = {
-  text: [{
-    required: true, message: '请输入Cookie', trigger: 'blur'
-  }, {
-    validator: (rule, value, callback) => {
-      let arr
-      try { arr = JSON.parse(value) } catch {}
-      if (!Array.isArray(arr) || arr.length === 0) return callback(new Error('Cookie格式不正确'))
-      callback()
+  text: [
+    {
+      required: true,
+      message: '请输入Cookie',
+      trigger: 'blur'
     },
-    trigger: 'blur'
-  }]
+    {
+      validator: (rule, value, callback) => {
+        let arr
+        try {
+          arr = JSON.parse(value)
+        } catch {}
+        if (!Array.isArray(arr) || arr.length === 0) return callback(new Error('Cookie格式不正确'))
+        callback()
+      },
+      trigger: 'blur'
+    }
+  ]
 }
 
 let model = reactive({
@@ -459,6 +471,10 @@ watch(activeGroupId, (newVal) => {
   model.condition.proxyId = ''
   model.condition.keyword = ''
   model.page.current = 1
+  selectedRow.value = null
+  nextTick(() => {
+    tableRef.value?.setCurrentRow(null)
+  })
   resize()
 })
 
@@ -501,6 +517,10 @@ const search = async () => {
     if (res) {
       model.list = res.list || []
       model.page.total = res.total || 0
+      selectedRow.value = null
+      nextTick(() => {
+        tableRef.value?.setCurrentRow(null)
+      })
     }
   } catch (err) {
     console.error(err)
@@ -546,17 +566,40 @@ const buildPayload = () => {
 }
 
 const onItemClick = (row) => {
-  updateDeviceInfo(row)
+  if (selectedRow.value && selectedRow.value._id === row._id) {
+    selectedRow.value = null
+    nextTick(() => {
+      tableRef.value?.setCurrentRow(null)
+    })
+  } else {
+    selectedRow.value = row
+  }
 }
 
 const onAddClick = () => {
-  model.form = {
-    name: '',
-    groupId: activeGroupId.value,
-    sort: 0,
-    proxy: '',
-    args: '',
-    fp: defaultFp()
+  if (selectedRow.value) {
+    const fpObj = selectedRow.value.fingerprint
+      ? JSON.parse(JSON.stringify(selectedRow.value.fingerprint))
+      : defaultFp()
+    model.form = {
+      name: '',
+      groupId: selectedRow.value.groupId || activeGroupId.value,
+      sort: selectedRow.value.sort || 0,
+      proxy: selectedRow.value.proxy || '',
+      args: selectedRow.value.args || '',
+      notes: selectedRow.value.notes || '',
+      fp: fpObj
+    }
+  } else {
+    model.form = {
+      name: '',
+      groupId: activeGroupId.value,
+      sort: 0,
+      proxy: '',
+      args: '',
+      notes: '',
+      fp: defaultFp()
+    }
   }
   nextTick(() => {
     formRef.value && formRef.value.clearValidate()
@@ -670,7 +713,7 @@ const onCookieImport = (row) => {
 }
 
 const onCookieImportConfirm = async () => {
-  if (!await validateForm(cookieFormRef.value)) return
+  if (!(await validateForm(cookieFormRef.value))) return
   const cookies = JSON.parse(cookieForm.text)
   try {
     await importCookies({ id: cookieImportRow.value._id, cookies })
@@ -750,6 +793,10 @@ defineExpose({
   .left .cell {
     padding-left: 24px;
   }
+}
+
+.delete-item {
+  color: #f56c6c !important;
 }
 </style>
 

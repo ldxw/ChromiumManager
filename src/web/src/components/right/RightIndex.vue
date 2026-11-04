@@ -190,7 +190,7 @@ const onAddClick = () => {
       display: flex;
       padding: 10px 0;
       width: 50%;
-      min-width: 460px;
+      min-width: 510px;
 
       .search {
         border-top-left-radius: 0;
