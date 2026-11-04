@@ -1,0 +1,154 @@
+name: 从上游重打包 Chromium 二进制
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: '上游 portablelinux 的 Release 标签，留空则取最新正式 Release'
+        required: false
+        type: string
+        default: ''
+      release_tag:
+        description: '本仓库的 Release 标签，留空则沿用上游标签'
+        required: false
+        type: string
+        default: ''
+      update_latest:
+        description: '是否把该 Release 标记为 latest'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repack-chromium-binary
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: ungoogled-software/ungoogled-chromium-portablelinux
+
+jobs:
+  repack:
+    name: 下载并重打包
+    runs-on: ubuntu-latest
+    steps:
+      - name: 解析标签
+        id: prep
+        env:
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ -n "${INPUT_UPSTREAM_TAG}" ]; then
+            upstream_tag="${INPUT_UPSTREAM_TAG}"
+          else
+            upstream_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+          fi
+
+          if [ -z "${upstream_tag}" ] || [ "${upstream_tag}" = "null" ]; then
+            echo "无法确定上游 Release 标签"
+            exit 1
+          fi
+
+          release_tag="${INPUT_RELEASE_TAG:-${upstream_tag}}"
+
+          echo "上游：${upstream_tag}，本仓库：${release_tag}"
+          echo "upstream_tag=${upstream_tag}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: 下载上游 tar.xz
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ steps.prep.outputs.upstream_tag }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p upstream
+          gh release download "${UPSTREAM_TAG}" \
+            --repo "${UPSTREAM_REPO}" \
+            --pattern '*_linux.tar.xz' \
+            --dir upstream
+          ls -lh upstream
+
+      - name: 转成 Dockerfile 需要的命名与压缩格式
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p release
+
+          shopt -s nullglob
+          for src in upstream/ungoogled-chromium-*_linux.tar.xz; do
+            case "${src}" in
+              *-x86_64_linux.tar.xz) arch=amd64 ;;
+              *-arm64_linux.tar.xz)  arch=arm64 ;;
+              *) echo "跳过无法识别架构的包：${src}"; continue ;;
+            esac
+
+            # 上游文件名形如 ungoogled-chromium-<version>-<arch>_linux.tar.xz，
+            # 去掉前缀后产出 chromium-<version>-<arch>_linux.tar.gz
+            base="$(basename "${src}" _linux.tar.xz)"
+            base="${base#ungoogled-chromium-}"
+            base="${base%-x86_64}"
+            base="${base%-arm64}"
+            dst="release/chromium-${base}-${arch}_linux.tar.gz"
+
+            echo "转换：${src} -> ${dst}"
+            xz -T0 -dc "${src}" | gzip -9 > "${dst}"
+
+            # 两个清单都完整读入，避免 head 提前关管道触发 SIGPIPE 被 pipefail 判为失败
+            src_listed="$(xz -T0 -dc "${src}" | tar -tf -)"
+            dst_listed="$(tar -tzf "${dst}")"
+            if [ "${src_listed}" != "${dst_listed}" ]; then
+              echo "包内结构不一致：${src}"
+              diff <(printf '%s\n' "${src_listed}") <(printf '%s\n' "${dst_listed}") || true
+              exit 1
+            fi
+          done
+
+          if [ -z "$(ls -A release)" ]; then
+            echo "没有产出任何包"
+            exit 1
+          fi
+          ls -lh release
+
+      - name: 创建或更新 Release 并上传
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prep.outputs.release_tag }}
+          UPSTREAM_TAG: ${{ steps.prep.outputs.upstream_tag }}
+          UPDATE_LATEST: ${{ inputs.update_latest }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          latest_flag=(--latest=false)
+          if [ "${UPDATE_LATEST}" = "true" ]; then
+            latest_flag=(--latest)
+          fi
+
+          body="$(
+            printf 'Chromium 二进制重打包自 %s 的 `%s`。\n\n' "${UPSTREAM_REPO}" "${UPSTREAM_TAG}"
+            printf -- '- 官方产物为 `.tar.xz`，此处解压后以 `gzip -9` 重新压缩为 `.tar.gz`\n'
+            printf -- '- 文件名去掉 `ungoogled-` 前缀，`x86_64` 替换为 `amd64`，以匹配 Dockerfile 的 `${TARGETARCH}`\n'
+          )"
+
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} 已存在，追加附件"
+            gh release upload "${RELEASE_TAG}" release/*.tar.gz \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+            gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --notes "${body}" "${latest_flag[@]}"
+          else
+            gh release create "${RELEASE_TAG}" release/*.tar.gz \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${RELEASE_TAG}" \
+              --notes "${body}" \
+              "${latest_flag[@]}"
+          fi
+
+          echo "完成：${RELEASE_TAG}"

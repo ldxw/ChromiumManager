@@ -225,10 +225,30 @@ jobs:
           set -Eeuo pipefail
           echo "开始下载 Release 附件：${RELEASE_TAG}"
 
-          gh release download "${RELEASE_TAG}" \
+          # 新包用 chromium- 前缀；同步上游得来的旧 Release 仍是 ungoogled-chromium-，
+          # 下载后去掉前缀，统一交给 Dockerfile 的 chromium-* 通配匹配
+          if ! gh release download "${RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --pattern 'ungoogled-chromium-*_linux.tar.gz' \
-            --dir .
+            --pattern 'chromium-*_linux.tar.gz' \
+            --dir .; then
+            echo "未找到 chromium- 前缀附件，回退到 ungoogled-chromium- 前缀"
+            gh release download "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern 'ungoogled-chromium-*_linux.tar.gz' \
+              --dir .
+            for f in ungoogled-chromium-*_linux.tar.gz; do
+              [ -e "$f" ] || continue
+              mv "$f" "${f#ungoogled-}"
+            done
+          fi
+
+          shopt -s nullglob
+          pkgs=(chromium-*_linux.tar.gz)
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "Release ${RELEASE_TAG} 中没有可用的 *_linux.tar.gz 附件"
+            exit 1
+          fi
+          ls -lh "${pkgs[@]}"
 
       - name: 设置 QEMU
         uses: docker/setup-qemu-action@v4

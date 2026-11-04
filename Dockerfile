@@ -31,10 +31,10 @@ RUN \
     /var/lib/apt/lists/* \
     /var/tmp/*
 
-COPY ungoogled-chromium-*-${TARGETARCH}_linux.tar.gz /tmp/
+COPY chromium-*-${TARGETARCH}_linux.tar.gz /tmp/
 RUN mkdir -p /opt/chromium && \
-  tar xf /tmp/ungoogled-chromium-*-${TARGETARCH}_linux.tar.gz --strip-components=1 -C /opt/chromium && \
-  rm -f /tmp/ungoogled-chromium-*.tar.gz
+  tar xf /tmp/chromium-*-${TARGETARCH}_linux.tar.gz --strip-components=1 -C /opt/chromium && \
+  rm -f /tmp/chromium-*.tar.gz
 
 COPY --from=builder /build/manager /usr/bin/manager
 
