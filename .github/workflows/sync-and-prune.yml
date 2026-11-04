@@ -1,0 +1,91 @@
+name: 一次性：同步上游包并清理旧附件
+
+# 用途：先按上游同名同格式（*_linux.tar.xz）把二进制补进目标 Release，
+# 确认两个架构都在之后再删除旧的 .tar.gz 附件，避免 Release 出现零附件。
+# 执行完成后本文件会被删除。
+
+on:
+  push:
+    paths:
+      - .github/workflows/sync-and-prune.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-and-prune
+  cancel-in-progress: false
+
+env:
+  TARGET_TAG: '156.0.8078.79-1'
+
+jobs:
+  sync:
+    name: 同步上游二进制
+    uses: ./.github/workflows/repack-chromium-binary.yml
+    with:
+      upstream_tag: '156.0.8078.79-1'
+      release_tag: '156.0.8078.79-1'
+      update_latest: true
+      sync_all: false
+      max_releases: '0'
+      fetch_all_assets: false
+      force_resync: false
+
+  prune:
+    name: 删除旧命名附件
+    needs: sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 校验新附件齐全
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          names="$(gh release view "${TARGET_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq '.assets[].name')"
+          printf '%s\n' "${names}"
+          echo "----"
+
+          for a in x86_64 arm64; do
+            printf '%s\n' "${names}" | grep -Eq "^ungoogled-chromium-.*-${a}_linux\.tar\.xz$" \
+              || { echo "缺少 ${a} 的 .tar.xz，取消删除旧附件"; exit 1; }
+          done
+          echo "两个架构的 .tar.xz 均在，可以删除旧附件"
+
+      - name: 删除非 .tar.xz 附件
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          gh release view "${TARGET_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq '.assets[].name' > /tmp/asset-names.txt
+
+          while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            case "${name}" in
+              *_linux.tar.xz) echo "保留：${name}"; continue ;;
+            esac
+            echo "删除：${name}"
+            if ! gh release delete-asset "${TARGET_TAG}" "${name}" \
+                   --repo "${GITHUB_REPOSITORY}" --yes; then
+              echo "删除失败：${name}"
+              exit 1
+            fi
+          done < /tmp/asset-names.txt
+
+      - name: 列出剩余附件
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "剩余附件："
+          gh release view "${TARGET_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq '.assets[] | "\(.name)\t\(.size)"'
