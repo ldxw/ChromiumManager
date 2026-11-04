@@ -25,10 +25,10 @@ on:
         type: boolean
         default: false
       max_releases:
-        description: '批量模式（sync_all=true）下最多处理几个版本，按版本从高到低取；0 表示全部'
+        description: '批量模式（sync_all=true）下最多处理几个版本，按版本从高到低取，默认 1；0 表示全部'
         required: false
         type: string
-        default: '0'
+        default: '1'
       fetch_all_assets:
         description: '拉取范围：默认只取 *_linux.tar.xz 原样同步；勾选则连同该版本其余附件（AppImage、zsync 等）一并同步'
         required: false
@@ -61,10 +61,10 @@ on:
         type: boolean
         default: false
       max_releases:
-        description: '批量模式（sync_all=true）下最多处理几个版本，按版本从高到低取；0 表示全部'
+        description: '批量模式（sync_all=true）下最多处理几个版本，按版本从高到低取，默认 1；0 表示全部'
         required: false
         type: string
-        default: '0'
+        default: '1'
       fetch_all_assets:
         description: '拉取范围：默认只取 *_linux.tar.xz 原样同步；勾选则连同该版本其余附件（AppImage、zsync 等）一并同步'
         required: false
