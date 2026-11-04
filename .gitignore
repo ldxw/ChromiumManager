@@ -4,4 +4,5 @@ dist
 *.log
 
 # 构建镜像前从 Release 下载的 Chromium 二进制
-chromium-*.tar.gz
+ungoogled-chromium-*.tar.xz
+ungoogled-chromium-*.tar.gz

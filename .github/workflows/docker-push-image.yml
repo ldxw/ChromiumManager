@@ -225,27 +225,46 @@ jobs:
           set -Eeuo pipefail
           echo "开始下载 Release 附件：${RELEASE_TAG}"
 
-          # 新包用 chromium- 前缀；同步上游得来的旧 Release 仍是 ungoogled-chromium-，
-          # 下载后去掉前缀，统一交给 Dockerfile 的 chromium-* 通配匹配
-          if ! gh release download "${RELEASE_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern 'chromium-*_linux.tar.gz' \
-            --dir .; then
-            echo "未找到 chromium- 前缀附件，回退到 ungoogled-chromium- 前缀"
-            gh release download "${RELEASE_TAG}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --pattern 'ungoogled-chromium-*_linux.tar.gz' \
-              --dir .
-            for f in ungoogled-chromium-*_linux.tar.gz; do
-              [ -e "$f" ] || continue
-              mv "$f" "${f#ungoogled-}"
-            done
+          # 附件名与上游一致：ungoogled-chromium-<ver>-<rev>-<arch>_linux.tar.xz
+          # 先列附件再下载，缺包时打印实际内容，避免 gh 直接以非零退出吞掉原因
+          if ! names="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+                 --json assets --jq '.assets[].name')"; then
+            echo "读取 Release ${RELEASE_TAG} 失败，请确认标签存在且工作流有 contents: read 权限"
+            exit 1
           fi
 
           shopt -s nullglob
-          pkgs=(chromium-*_linux.tar.gz)
+          mapfile -t all_names <<< "${names}"
+          if [ "${#all_names[@]}" -eq 1 ] && [ -z "${all_names[0]}" ]; then
+            all_names=()
+          fi
+
+          pkgs=()
+          for name in "${all_names[@]}"; do
+            case "${name}" in
+              ungoogled-chromium-*_linux.tar.xz) pkgs+=("${name}") ;;
+            esac
+          done
+
           if [ "${#pkgs[@]}" -eq 0 ]; then
-            echo "Release ${RELEASE_TAG} 中没有可用的 *_linux.tar.gz 附件"
+            echo "Release ${RELEASE_TAG} 中没有 *_linux.tar.xz 附件，现有附件："
+            if [ "${#all_names[@]}" -eq 0 ]; then
+              echo "  （空）"
+            else
+              printf '  %s\n' "${all_names[@]}"
+            fi
+            echo "请先用「从上游同步 Chromium 二进制」工作流重新同步该版本"
+            exit 1
+          fi
+
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'ungoogled-chromium-*_linux.tar.xz' \
+            --dir .
+
+          pkgs=(ungoogled-chromium-*_linux.tar.xz)
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "下载后没有落地的 *_linux.tar.xz 文件"
             exit 1
           fi
           ls -lh "${pkgs[@]}"

@@ -1,4 +1,4 @@
-name: 从上游重打包 Chromium 二进制
+name: 从上游同步 Chromium 二进制
 
 on:
   # 留作可复用工作流；输入与手动触发保持一致
@@ -10,15 +10,34 @@ on:
         type: string
         default: ''
       release_tag:
-        description: '本仓库的 Release 标签，留空则沿用上游标签'
+        description: '本仓库的 Release 标签，留空则沿用上游标签；批量模式不可指定'
         required: false
         type: string
         default: ''
       update_latest:
-        description: '是否把该 Release 标记为 latest'
+        description: '是否把末尾版本标记为 latest'
         required: false
         type: boolean
         default: true
+      sync_all:
+        description: '默认只处理一个版本（指定或上游最新）；勾选则批量遍历上游全部正式 Release'
+        required: false
+        type: boolean
+        default: false
+      max_releases:
+        description: '批量模式（sync_all=true）下最多处理几个版本，按版本从高到低取；0 表示全部'
+        required: false
+        type: string
+        default: '0'
+      fetch_all_assets:
+        description: '拉取范围：默认只取 *_linux.tar.xz 原样同步；勾选则连同该版本其余附件（AppImage、zsync 等）一并同步'
+        required: false
+        type: boolean
+        default: false
+      force_resync:
+        description: '强制拉取：目标 Release 已有对应附件时仍重新下载并覆盖'
+        required: false
+        type: boolean
   workflow_dispatch:
     inputs:
       upstream_tag:
@@ -27,15 +46,34 @@ on:
         type: string
         default: ''
       release_tag:
-        description: '本仓库的 Release 标签，留空则沿用上游标签'
+        description: '本仓库的 Release 标签，留空则沿用上游标签；批量模式不可指定'
         required: false
         type: string
         default: ''
       update_latest:
-        description: '是否把该 Release 标记为 latest'
+        description: '是否把末尾版本标记为 latest'
         required: false
         type: boolean
         default: true
+      sync_all:
+        description: '默认只处理一个版本（指定或上游最新）；勾选则批量遍历上游全部正式 Release'
+        required: false
+        type: boolean
+        default: false
+      max_releases:
+        description: '批量模式（sync_all=true）下最多处理几个版本，按版本从高到低取；0 表示全部'
+        required: false
+        type: string
+        default: '0'
+      fetch_all_assets:
+        description: '拉取范围：默认只取 *_linux.tar.xz 原样同步；勾选则连同该版本其余附件（AppImage、zsync 等）一并同步'
+        required: false
+        type: boolean
+        default: false
+      force_resync:
+        description: '强制拉取：目标 Release 已有对应附件时仍重新下载并覆盖'
+        required: false
+        type: boolean
 
 permissions:
   contents: write
@@ -49,124 +87,268 @@ env:
 
 jobs:
   repack:
-    name: 下载并重打包
+    name: 下载并同步
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - name: 解析标签
         id: prep
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
-          GH_TOKEN: ${{ github.token }}
+          SYNC_ALL: ${{ inputs.sync_all }}
+          MAX_RELEASES: ${{ inputs.max_releases }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          if [ -n "${INPUT_UPSTREAM_TAG}" ]; then
-            upstream_tag="${INPUT_UPSTREAM_TAG}"
-          else
-            upstream_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+          if [ "${SYNC_ALL}" = "true" ] && [ -n "${INPUT_RELEASE_TAG}" ]; then
+            echo "批量模式下不能指定 release_tag"
+            exit 1
           fi
 
-          if [ -z "${upstream_tag}" ] || [ "${upstream_tag}" = "null" ]; then
+          if [ "${SYNC_ALL}" = "true" ] && [ -n "${INPUT_UPSTREAM_TAG}" ]; then
+            echo "批量模式下不能指定 upstream_tag；只处理单个版本时请取消勾选 sync_all"
+            exit 1
+          fi
+
+          if [ -n "${INPUT_UPSTREAM_TAG}" ]; then
+            upstream_tags="${INPUT_UPSTREAM_TAG}"
+            if ! gh api "repos/${UPSTREAM_REPO}/releases/tags/${upstream_tags}" \
+                   --jq '.tag_name' >/dev/null 2>&1; then
+              echo "上游不存在该 Release：${upstream_tags}"
+              echo "最近的可选版本："
+              gh api "repos/${UPSTREAM_REPO}/releases?per_page=20" \
+                --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+                | sort -V || true
+              exit 1
+            fi
+            echo "使用指定上游标签：${upstream_tags}"
+          elif [ "${SYNC_ALL}" = "true" ]; then
+            case "${MAX_RELEASES}" in
+              ''|*[!0-9]*) echo "max_releases 必须是非负整数：${MAX_RELEASES}"; exit 1 ;;
+            esac
+
+            mapfile -t all_tags < <(
+              gh api --paginate -H "Accept: application/vnd.github+json" \
+                "repos/${UPSTREAM_REPO}/releases?per_page=100" \
+                --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+                | sort -V
+            )
+
+            total="${#all_tags[@]}"
+            if [ "${total}" -eq 0 ]; then
+              echo "上游没有可用的正式 Release"
+              exit 1
+            fi
+
+            if [ "${MAX_RELEASES}" -gt 0 ] && [ "${total}" -gt "${MAX_RELEASES}" ]; then
+              start=$((total - MAX_RELEASES))
+              echo "上游共 ${total} 个正式 Release，只处理最新的 ${MAX_RELEASES} 个"
+            else
+              start=0
+              echo "上游共 ${total} 个正式 Release，全部处理"
+            fi
+
+            upstream_tags="$(printf '%s\n' "${all_tags[@]:start}")"
+          else
+            upstream_tags="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')"
+            echo "使用上游最新正式 Release：${upstream_tags}"
+          fi
+
+          if [ -z "${upstream_tags}" ] || [ "${upstream_tags}" = "null" ]; then
             echo "无法确定上游 Release 标签"
             exit 1
           fi
 
-          release_tag="${INPUT_RELEASE_TAG:-${upstream_tag}}"
+          count="$(printf '%s\n' "${upstream_tags}" | grep -c . || true)"
+          echo "待处理版本数：${count}"
 
-          echo "上游：${upstream_tag}，本仓库：${release_tag}"
-          echo "upstream_tag=${upstream_tag}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF_TAGS"
+            printf '%s\n' "${upstream_tags}" | grep . || true
+            echo "EOF_TAGS"
+            echo "count=${count}"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: 下载上游 tar.xz
+      - name: 逐版本同步并发布
         env:
           GH_TOKEN: ${{ github.token }}
-          UPSTREAM_TAG: ${{ steps.prep.outputs.upstream_tag }}
+          TAGS: ${{ steps.prep.outputs.tags }}
+          TOTAL: ${{ steps.prep.outputs.count }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          SYNC_ALL: ${{ inputs.sync_all }}
+          UPDATE_LATEST: ${{ inputs.update_latest }}
+          FETCH_ALL_ASSETS: ${{ inputs.fetch_all_assets }}
+          FORCE_RESYNC: ${{ inputs.force_resync }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p upstream
-          gh release download "${UPSTREAM_TAG}" \
-            --repo "${UPSTREAM_REPO}" \
-            --pattern '*_linux.tar.xz' \
-            --dir upstream
-          ls -lh upstream
-
-      - name: 转成 Dockerfile 需要的命名与压缩格式
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p release
-
           shopt -s nullglob
-          for src in upstream/ungoogled-chromium-*_linux.tar.xz; do
-            case "${src}" in
-              *-x86_64_linux.tar.xz) arch=amd64 ;;
-              *-arm64_linux.tar.xz)  arch=arm64 ;;
-              *) echo "跳过无法识别架构的包：${src}"; continue ;;
-            esac
 
-            # 上游文件名形如 ungoogled-chromium-<version>-<arch>_linux.tar.xz，
-            # 去掉前缀后产出 chromium-<version>-<arch>_linux.tar.gz
-            base="$(basename "${src}" _linux.tar.xz)"
-            base="${base#ungoogled-chromium-}"
-            base="${base%-x86_64}"
-            base="${base%-arm64}"
-            dst="release/chromium-${base}-${arch}_linux.tar.gz"
+          failures=()
+          published=()
+          index=0
 
-            echo "转换：${src} -> ${dst}"
-            xz -T0 -dc "${src}" | gzip -9 > "${dst}"
+          while IFS= read -r tag; do
+            [ -n "${tag}" ] || continue
+            index=$((index + 1))
+            echo "======== [${index}/${TOTAL}] ${tag} ========"
 
-            # 两个清单都完整读入，避免 head 提前关管道触发 SIGPIPE 被 pipefail 判为失败
-            src_listed="$(xz -T0 -dc "${src}" | tar -tf -)"
-            dst_listed="$(tar -tzf "${dst}")"
-            if [ "${src_listed}" != "${dst_listed}" ]; then
-              echo "包内结构不一致：${src}"
-              diff <(printf '%s\n' "${src_listed}") <(printf '%s\n' "${dst_listed}") || true
-              exit 1
+            if [ "${SYNC_ALL}" = "true" ]; then
+              target="${tag}"
+            else
+              target="${INPUT_RELEASE_TAG:-${tag}}"
             fi
-          done
 
-          if [ -z "$(ls -A release)" ]; then
-            echo "没有产出任何包"
+            # 产物完全照搬上游：ungoogled-chromium-<version>-<rev>-<x86_64|arm64>_linux.tar.xz
+            upstream_assets=()
+            while IFS= read -r a; do
+              [ -n "${a}" ] && upstream_assets+=("${a}")
+            done <<< "$(gh release view "${tag}" --repo "${UPSTREAM_REPO}" \
+              --json assets --jq '.assets[].name' 2>/dev/null || true)"
+
+            # 期望在目标 Release 里出现的附件：压缩包原样保留，全量模式下再加上游其余附件
+            expected=()
+            archives=()
+            for a in "${upstream_assets[@]}"; do
+              case "${a}" in
+                *_linux.tar.xz)
+                  expected+=("${a}")
+                  archives+=("${a}")
+                  ;;
+                *)
+                  if [ "${FETCH_ALL_ASSETS:-false}" = "true" ]; then
+                    expected+=("${a}")
+                  fi
+                  ;;
+              esac
+            done
+
+            if [ "${#archives[@]}" -eq 0 ]; then
+              echo "该版本没有 *_linux.tar.xz 附件，跳过：${tag}"
+              failures+=("${tag}:无 linux 包")
+              continue
+            fi
+
+            if [ "${FORCE_RESYNC:-false}" != "true" ] && \
+               gh release view "${target}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              existing_names="$(gh release view "${target}" --repo "${GITHUB_REPOSITORY}" \
+                --json assets --jq '.assets[].name' || true)"
+              missing=0
+              for want in "${expected[@]}"; do
+                case $'\n'"${existing_names}"$'\n' in
+                  *$'\n'"${want}"$'\n'*) ;;
+                  *) missing=$((missing + 1)); echo "缺少附件：${want}" ;;
+                esac
+              done
+              if [ "${#expected[@]}" -gt 0 ] && [ "${missing}" -eq 0 ]; then
+                echo "Release ${target} 已包含全部 ${#expected[@]} 个附件，跳过（force_resync=true 可覆盖）"
+                published+=("${target}")
+                continue
+              fi
+              echo "Release ${target} 缺少 ${missing} 个附件，重新同步"
+            fi
+
+            work="build/${tag}"
+            dl="${work}/upstream"
+            out="${work}/release"
+            rm -rf "${work}"
+            mkdir -p "${dl}" "${out}"
+
+            if [ "${FETCH_ALL_ASSETS:-false}" = "true" ]; then
+              dl_args=()
+              echo "拉取范围：该版本全部附件"
+            else
+              dl_args=(--pattern '*_linux.tar.xz')
+              echo "拉取范围：仅 *_linux.tar.xz 压缩包"
+            fi
+
+            if ! gh release download "${tag}" \
+                   --repo "${UPSTREAM_REPO}" \
+                   "${dl_args[@]}" \
+                   --dir "${dl}"; then
+              echo "下载失败，跳过：${tag}"
+              failures+=("${tag}:下载失败")
+              rm -rf "${work}"
+              continue
+            fi
+
+            # 原样搬运：文件名与压缩格式均与上游一致，不做重压或改名
+            produced=0
+            missing_after_dl=()
+            for a in "${expected[@]}"; do
+              if [ ! -f "${dl}/${a}" ]; then
+                echo "下载后缺少附件：${a}"
+                missing_after_dl+=("${a}")
+                continue
+              fi
+              cp "${dl}/${a}" "${out}/${a}"
+              echo "同步：${a}"
+              produced=$((produced + 1))
+            done
+
+            if [ "${#missing_after_dl[@]}" -gt 0 ] || [ "${produced}" -eq 0 ]; then
+              echo "同步失败：${tag}"
+              failures+=("${tag}:同步失败")
+              rm -rf "${work}"
+              continue
+            fi
+
+            upstream_body="$(
+              gh api -H "Accept: application/vnd.github+json" \
+                "repos/${UPSTREAM_REPO}/releases/tags/${tag}" \
+                --jq '.body // ""' || true
+            )"
+
+            notes_file="${work}/notes.md"
+            {
+              printf '%s\n\n' "${upstream_body}"
+              printf -- '---\n\n'
+              printf '本仓库同步自 `%s` 的 `%s`：\n\n' "${UPSTREAM_REPO}" "${tag}"
+              printf -- '- 附件与上游同名同格式（`*_linux.tar.xz`），原样搬运，未重新压缩\n'
+              if [ "${FETCH_ALL_ASSETS:-false}" = "true" ]; then
+                printf -- '- 该版本上游其余附件（AppImage、zsync 等）已原样同步\n'
+              fi
+            } > "${notes_file}"
+
+            if gh release view "${target}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "Release ${target} 已存在，追加附件"
+              gh release upload "${target}" "${out}"/* \
+                --repo "${GITHUB_REPOSITORY}" --clobber
+              gh release edit "${target}" --repo "${GITHUB_REPOSITORY}" \
+                --title "${target}" --notes-file "${notes_file}" --latest=false
+            else
+              echo "创建 Release ${target}"
+              gh release create "${target}" "${out}"/* \
+                --repo "${GITHUB_REPOSITORY}" \
+                --title "${target}" \
+                --notes-file "${notes_file}" \
+                --latest=false
+            fi
+
+            rm -rf "${work}"
+            published+=("${target}")
+            echo "完成：${target}"
+          done <<< "${TAGS}"
+
+          if [ "${#failures[@]}" -gt 0 ]; then
+            printf '以下版本处理失败：\n'
+            printf -- '- %s\n' "${failures[@]}"
+          fi
+
+          if [ "${#published[@]}" -eq 0 ]; then
+            echo "没有任何版本成功处理"
             exit 1
           fi
-          ls -lh release
 
-      - name: 创建或更新 Release 并上传
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.prep.outputs.release_tag }}
-          UPSTREAM_TAG: ${{ steps.prep.outputs.upstream_tag }}
-          UPDATE_LATEST: ${{ inputs.update_latest }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          latest_flag=(--latest=false)
           if [ "${UPDATE_LATEST}" = "true" ]; then
-            latest_flag=(--latest)
-          fi
-
-          body="$(
-            printf 'Chromium 二进制重打包自 %s 的 `%s`。\n\n' "${UPSTREAM_REPO}" "${UPSTREAM_TAG}"
-            printf -- '- 官方产物为 `.tar.xz`，此处解压后以 `gzip -9` 重新压缩为 `.tar.gz`\n'
-            printf -- '- 文件名去掉 `ungoogled-` 前缀，`x86_64` 替换为 `amd64`，以匹配 Dockerfile 的 `${TARGETARCH}`\n'
-          )"
-
-          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "Release ${RELEASE_TAG} 已存在，追加附件"
-            gh release upload "${RELEASE_TAG}" release/*.tar.gz \
-              --repo "${GITHUB_REPOSITORY}" --clobber
-            gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
-              --notes "${body}" "${latest_flag[@]}"
+            latest="${published[${#published[@]}-1]}"
+            echo "设置 latest：${latest}"
+            gh release edit "${latest}" --repo "${GITHUB_REPOSITORY}" --latest
           else
-            gh release create "${RELEASE_TAG}" release/*.tar.gz \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${RELEASE_TAG}" \
-              --notes "${body}" \
-              "${latest_flag[@]}"
+            echo "按输入跳过 latest 设置"
           fi
 
-          echo "完成：${RELEASE_TAG}"
+          echo "全部完成，共 ${#published[@]} 个版本"
