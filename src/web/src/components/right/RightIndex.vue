@@ -67,14 +67,7 @@
 
 <script setup>
 import { inject, provide, reactive, ref, computed, watch, onMounted } from 'vue'
-import {
-  Search,
-  Refresh,
-  Plus,
-  ArrowDown,
-  CircleClose,
-  Expand
-} from '@element-plus/icons-vue'
+import { Search, Refresh, Plus, ArrowDown, CircleClose, Expand } from '@element-plus/icons-vue'
 import { getProxies } from '@/api'
 import { useBreakpoint } from '@/utils/useBreakpoint'
 

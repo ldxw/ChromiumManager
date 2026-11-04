@@ -155,10 +155,7 @@
         <el-row :gutter="20">
           <el-col :xs="24" :sm="12">
             <el-form-item label="位置" prop="location">
-              <el-input
-                v-model="form.location"
-                placeholder="请输入或选择位置"
-              >
+              <el-input v-model="form.location" placeholder="请输入或选择位置">
                 <template #suffix>
                   <el-icon class="location-pick-icon" @click.stop="onPickLocation">
                     <Location />
