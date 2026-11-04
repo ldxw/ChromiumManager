@@ -1,7 +1,7 @@
 name: 从上游重打包 Chromium 二进制
 
 on:
-  # 供 reset-and-repack.yml 复用；输入与手动触发保持一致
+  # 留作可复用工作流；输入与手动触发保持一致
   workflow_call:
     inputs:
       upstream_tag:
