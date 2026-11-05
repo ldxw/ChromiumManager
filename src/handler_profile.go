@@ -278,6 +278,9 @@ func launchProfileByID(idStr string) error {
 	for _, f := range singletonFiles {
 		os.Remove(f)
 	}
+	// 上一次运行遗留的端口文件指向的进程已经没了，留着会让 watchDevToolsPort
+	// 读到旧端口直接返回，之后 navigate 连的是一条死连接。
+	os.Remove(filepath.Join(absUserDataDir, "DevToolsActivePort"))
 
 	cookiePath := filepath.Join(absUserDataDir, "Default", "Cookies")
 
