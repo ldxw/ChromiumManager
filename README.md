@@ -98,31 +98,6 @@ docker run -d \
 
 * https://yourhost:3001/
 
-### Windows 原生版
-
-下载 `ChromiumManager-<版本>-windows-x64.zip` 解压后双击 `ChromiumManager.exe`：程序常驻系统托盘，
-不弹控制台窗口，自动用系统默认浏览器打开 `http://127.0.0.1:10101`。托盘菜单可重新打开界面或退出，
-退出时同时关闭所有已启动的浏览器实例。
-
-压缩包内已捆绑上游 `adryfish/fingerprint-chromium`，目录结构必须保持：
-
-```
-ChromiumManager.exe
-bin/chromium/chrome.exe ...
-```
-
-数据（数据库与各配置的浏览器用户目录）默认在 `%APPDATA%\ChromiumManager`，可用环境变量 `DATA_DIR`
-覆盖。
-
-自行构建：
-
-```bash
-scripts/build-windows.sh                  # 取上游最新正式 Release
-scripts/build-windows.sh --fp-tag X.Y.Z.W # 指定上游标签
-```
-
-产物在 `release/ChromiumManager-<tag>-windows-x64.zip`，需要 `go`、`curl`、`unzip`、`zip` 与 `pnpm`。
-
 ---
 
 ## 📖 使用说明
@@ -193,7 +168,7 @@ Streamable HTTP（先正常运行程序）：
 
 | 变量 | 作用 |
 | --- | --- |
-| `DATA_DIR` | 数据目录，默认 Windows 为 `%APPDATA%\ChromiumManager`，其余为 `./data` |
+| `DATA_DIR` | 数据目录，默认为 `./data` |
 | `MCP_ENABLE_DESTRUCTIVE` | 设为 `1` 才注册删除类工具（`delete_profile` / `delete_proxy` / `delete_group` / `stop_all_profiles`） |
 | `MCP_TOKEN` | 仅 HTTP 传输生效；设置后要求 `Authorization: Bearer <token>`，未设置不校验（服务只监听 127.0.0.1） |
 
@@ -216,5 +191,5 @@ Streamable HTTP（先正常运行程序）：
 
 MIT License
 
-本项目来源、本仓库的修改，以及 Go / 前端依赖、捆绑的 Chromium 与 Docker
-基础镜像各自的许可义务，见 [NOTICE](NOTICE)。
+本项目来源、本仓库的修改，以及 Go / 前端依赖与 Docker 基础镜像各自的
+许可义务，见 [NOTICE](NOTICE)。
