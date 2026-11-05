@@ -338,18 +338,71 @@ jobs:
           echo "本次将推送以下标签："
           printf "%s" "${raw_tags}"
 
+      # 用 shell 重试而不是 docker/build-push-action：拉 ghcr.io 上的基础镜像 blob 时偶发
+      # 429 Too Many Requests，单次失败的构建需要整条流水线重跑。同一次 job 里重试可以复用
+      # 已下载的层（buildkit 容器在 job 内常驻），因此只补拉失败的那部分。
+      # 也正因为依赖层复用，这里不能开 --no-cache，否则每次重试都从头下载。
       - name: 构建并推送镜像
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          pull: true
-          no-cache: true
-          tags: ${{ steps.tags.outputs.tags }}
-          labels: |
-            org.opencontainers.image.title=${{ steps.prep.outputs.image_name }}
-            org.opencontainers.image.description=ChromiumManager container image
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.prep.outputs.image_tag }}
-            org.opencontainers.image.revision=${{ github.sha }}
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+          IMAGE_NAME: ${{ steps.prep.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.prep.outputs.image_tag }}
+          BUILDKIT_PROGRESS: plain
+          MAX_ATTEMPTS: '3'
+          RETRY_DELAYS: '30 120'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          tags=()
+          while IFS= read -r tag; do
+            [ -n "${tag}" ] || continue
+            tags+=("${tag}")
+          done <<< "${TAGS}"
+
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "没有可用的镜像标签" >&2
+            exit 1
+          fi
+
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(-t "${tag}")
+          done
+
+          build() {
+            docker buildx build \
+              --push \
+              --pull \
+              --platform linux/amd64,linux/arm64 \
+              "${tag_args[@]}" \
+              --label "org.opencontainers.image.title=${IMAGE_NAME}" \
+              --label "org.opencontainers.image.description=ChromiumManager container image" \
+              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --label "org.opencontainers.image.version=${IMAGE_TAG}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              .
+          }
+
+          read -r -a delays <<< "${RETRY_DELAYS}"
+
+          for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+            echo "::group::构建尝试 ${attempt}/${MAX_ATTEMPTS}"
+            status=0
+            build || status=$?
+            echo "::endgroup::"
+
+            if [ "${status}" -eq 0 ]; then
+              echo "构建并推送成功（第 ${attempt} 次尝试）"
+              exit 0
+            fi
+
+            if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
+              echo "::error::构建连续失败 ${MAX_ATTEMPTS} 次，最后一次退出码 ${status}"
+              exit "${status}"
+            fi
+
+            delay="${delays[$((attempt - 1))]:-60}"
+            echo "第 ${attempt} 次构建失败（退出码 ${status}），${delay} 秒后重试" >&2
+            sleep "${delay}"
+          done
