@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -173,18 +174,29 @@ func deleteProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, Response[any]{Code: 400, Message: "invalid request body"})
 		return
 	}
-	rawID := decodeID(req.ID)
+	if err := deleteProfileByID(req.ID); err != nil {
+		code := 500
+		if errors.Is(err, errProfileNotFound) {
+			code = 404
+		}
+		writeJSON(w, Response[any]{Code: code, Message: err.Error()})
+		return
+	}
+	writeJSON(w, Response[any]{Code: 200, Message: "success"})
+}
+
+// deleteProfileByID removes a profile row and its user-data-dir from disk.
+func deleteProfileByID(idStr string) error {
+	rawID := decodeID(idStr)
 
 	// Query fingerprint seed before deletion to locate user data directory
 	var fp FingerprintConfig
 	if err := db.QueryRow("SELECT fingerprint FROM profiles WHERE id=?", rawID).Scan(&fp); err != nil {
-		writeJSON(w, Response[any]{Code: 404, Message: "profile not found"})
-		return
+		return errProfileNotFound
 	}
 
 	if _, err := db.Exec("DELETE FROM profiles WHERE id=?", rawID); err != nil {
-		writeJSON(w, Response[any]{Code: 500, Message: err.Error()})
-		return
+		return err
 	}
 
 	// Clean up profile user data directory from disk
@@ -196,8 +208,7 @@ func deleteProfile(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[Profile] removed user data dir: %s", userDataDir)
 		}
 	}
-
-	writeJSON(w, Response[any]{Code: 200, Message: "success"})
+	return nil
 }
 
 func showProfile(w http.ResponseWriter, r *http.Request) {
@@ -230,7 +241,20 @@ func launchProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, Response[any]{Code: 400, Message: "invalid request body"})
 		return
 	}
-	idStr := req.ID
+	if err := launchProfileByID(req.ID); err != nil {
+		code := 500
+		if errors.Is(err, errProfileNotFound) {
+			code = 404
+		}
+		writeJSON(w, Response[any]{Code: code, Message: err.Error()})
+		return
+	}
+	writeJSON(w, Response[any]{Code: 200, Message: "success"})
+}
+
+// launchProfileByID 启动一个配置的浏览器实例，返回错误而不是写 HTTP 响应，
+// 供 HTTP handler 与 MCP 工具共用。
+func launchProfileByID(idStr string) error {
 	rawID := decodeID(idStr)
 
 	var p Profile
@@ -239,8 +263,7 @@ func launchProfile(w http.ResponseWriter, r *http.Request) {
 	err := db.QueryRow("SELECT id, name, proxy, args, fingerprint, cookie FROM profiles WHERE id=?", rawID).
 		Scan(&rawID, &p.Name, &rawProxy, &p.Args, &p.Fingerprint, &cookieStr)
 	if err != nil {
-		writeJSON(w, Response[any]{Code: 404, Message: "Profile not found: " + err.Error()})
-		return
+		return fmt.Errorf("%w: %v", errProfileNotFound, err)
 	}
 	p.ID = idStr
 
@@ -266,12 +289,18 @@ func launchProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	chromePath := findBrowserPath()
+	if chromePath == "" {
+		return errors.New("Chromium not found: expected bin/chromium next to the program")
+	}
 	launchArgs := []string{
 		"--user-data-dir=" + absUserDataDir,
 		"--profile-name=" + p.Name,
 		"--no-first-run",
 		"--no-default-browser-check",
 		"--password-store=basic",
+		// Port 0 lets Chromium pick a free port and publish it in
+		// DevToolsActivePort, which watchDevToolsPort polls.
+		"--remote-debugging-port=0",
 	}
 
 	proxy := getProxyInfo(rawProxy)
@@ -338,22 +367,28 @@ func launchProfile(w http.ResponseWriter, r *http.Request) {
 
 	cmd := exec.Command(chromePath, launchArgs...)
 	if err := cmd.Start(); err != nil {
-		writeJSON(w, Response[any]{Code: 500, Message: "Failed to launch: " + err.Error()})
-		return
+		return fmt.Errorf("Failed to launch: %w", err)
 	}
 
 	done := make(chan struct{})
+	rp := &runningProfile{cmd: cmd, done: done, profileID: idStr, cookiePath: cookiePath}
 	runningMu.Lock()
-	runningProfiles[p.ID] = &runningProfile{cmd: cmd, done: done, profileID: idStr, cookiePath: cookiePath}
+	runningProfiles[p.ID] = rp
 	runningMu.Unlock()
 
-	writeJSON(w, Response[any]{Code: 200, Message: "success"})
 	broadcastRunning()
+
+	// Chromium writes the real port and ws path to DevToolsActivePort once CDP is
+	// ready; poll it in the background so list_running can report a devtools URL.
+	go watchDevToolsPort(rp, absUserDataDir)
 
 	go func() {
 		cmd.Wait()
 		close(done)
 		log.Printf("[Chrome] profile %s (%s) exited", p.Name, p.ID)
+
+		// 进程没了，缓存的 CDP 连接也没用了；不关会一直挂在已死的 websocket 上。
+		dropBrowserConn(p.ID)
 
 		if cookies := readCookiesFromFile(cookiePath); len(cookies) > 0 {
 			if data, err := json.Marshal(cookies); err == nil {
@@ -367,6 +402,8 @@ func launchProfile(w http.ResponseWriter, r *http.Request) {
 		runningMu.Unlock()
 		broadcastRunning()
 	}()
+
+	return nil
 }
 
 func stopProfile(w http.ResponseWriter, r *http.Request) {
@@ -377,14 +414,25 @@ func stopProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, Response[any]{Code: 400, Message: "invalid request body"})
 		return
 	}
-	id := req.ID
+	if err := stopProfileByID(req.ID); err != nil {
+		code := 500
+		if errors.Is(err, errNotRunning) {
+			code = 404
+		}
+		writeJSON(w, Response[any]{Code: code, Message: err.Error()})
+		return
+	}
+	writeJSON(w, Response[any]{Code: 200, Message: "success"})
+}
+
+// stopProfileByID 停止一个配置实例：非 Windows 先发 SIGTERM，5 秒后仍在则 Kill。
+func stopProfileByID(id string) error {
 	runningMu.Lock()
 	rp, ok := runningProfiles[id]
 	runningMu.Unlock()
 
 	if !ok {
-		writeJSON(w, Response[any]{Code: 404, Message: "not running"})
-		return
+		return errNotRunning
 	}
 
 	if rp.cmd.Process != nil {
@@ -404,5 +452,5 @@ func stopProfile(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	writeJSON(w, Response[any]{Code: 200, Message: "success"})
+	return nil
 }

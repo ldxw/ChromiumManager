@@ -10,8 +10,9 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
+	"path/filepath"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/sqids/sqids-go"
@@ -23,14 +24,33 @@ var webFS embed.FS
 
 const serverAddr = "127.0.0.1:10101"
 
+// appVersion is reported by the MCP serverInfo block. Release builds may inject
+// it with -ldflags "-X main.appVersion=..."; the default keeps source builds valid.
+var appVersion = "1.0.0"
+
 var (
 	sq      *sqids.Sqids
-	dataDir = "data"
+	dataDir string
+
+	httpServer   *http.Server
+	shutdownOnce sync.Once
 )
+
+// defaultDataDir returns the default data directory. On Windows it lives under
+// the user's config dir so the packaged build needs no writable CWD.
+func defaultDataDir() string {
+	if runtime.GOOS == "windows" {
+		if dir, err := os.UserConfigDir(); err == nil {
+			return filepath.Join(dir, "ChromiumManager")
+		}
+	}
+	return "data"
+}
 
 func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
 
+	dataDir = defaultDataDir()
 	if v := os.Getenv("DATA_DIR"); v != "" {
 		dataDir = v
 	}
@@ -172,9 +192,50 @@ func withMiddleware(next http.Handler) http.Handler {
 }
 
 func main() {
+	if hasArg(os.Args[1:], "--mcp-stdio") {
+		runMCPStdio()
+		return
+	}
+
 	initDB()
 	defer db.Close()
 
+	startServer()
+	runUI()
+	stopAllBrowsers()
+	stopServer()
+}
+
+// hasArg reports whether name appears in args. Used instead of the flag package
+// so unrelated flags meant for a wrapped binary are never rejected.
+func hasArg(args []string, name string) bool {
+	for _, a := range args {
+		if a == name {
+			return true
+		}
+	}
+	return false
+}
+
+// runMCPStdio serves the MCP protocol on stdin/stdout. stdout is the protocol
+// channel, so logging must stay on stderr; launching browsers is still allowed
+// and their output is discarded by exec.Cmd's nil writers.
+func runMCPStdio() {
+	log.SetOutput(os.Stderr)
+	initDB()
+	defer db.Close()
+
+	log.Printf("[MCP] stdio server starting (version %s)", appVersion)
+	if err := newMCPServer().serveStdio(os.Stdin, os.Stdout); err != nil {
+		log.Printf("[MCP] stdio server exited: %v", err)
+	}
+	stopAllBrowsers()
+	dropAllBrowserConns()
+}
+
+// startServer starts the HTTP server and returns immediately. The process keeps
+// running until runUI returns.
+func startServer() {
 	mux := http.NewServeMux()
 
 	// Group routes
@@ -205,29 +266,37 @@ func main() {
 	// SSE
 	mux.HandleFunc("GET /events", eventsHandler)
 
+	// MCP over Streamable HTTP。不限定方法，由 handler 自己回 405 + Allow，
+	// 这样 GET/DELETE 也能走到鉴权和 Allow 逻辑。
+	mux.Handle("/mcp", mcpHTTPHandler(newMCPServer()))
+
 	// Static files
 	fsSub, _ := fs.Sub(webFS, "web/dist")
 	mux.Handle("/", http.FileServer(http.FS(fsSub)))
 
 	handler := withMiddleware(mux)
-	server := &http.Server{Addr: serverAddr, Handler: handler}
+	httpServer = &http.Server{Addr: serverAddr, Handler: handler}
 
 	go func() {
 		log.Printf("[Server] listening on %s", serverAddr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("[Server] listen error: %v", err)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[Server] listen error: %v", err)
 		}
 	}()
+}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-	log.Printf("[Server] shutdown signal received, shutting down...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("[Server] forced shutdown: %v", err)
-	}
-	log.Printf("[Server] exited gracefully")
+// stopServer shuts the HTTP server down once, giving in-flight requests 5s.
+func stopServer() {
+	shutdownOnce.Do(func() {
+		if httpServer == nil {
+			return
+		}
+		log.Printf("[Server] shutting down...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			log.Printf("[Server] forced shutdown: %v", err)
+		}
+		log.Printf("[Server] exited gracefully")
+	})
 }

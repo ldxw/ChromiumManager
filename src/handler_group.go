@@ -81,27 +81,29 @@ func deleteGroup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, Response[any]{Code: 400, Message: "invalid request body"})
 		return
 	}
-	rawID := decodeID(req.ID)
-
-	// Use transaction to delete group and move its profiles to default group
-	tx, err := db.Begin()
-	if err != nil {
-		writeJSON(w, Response[any]{Code: 500, Message: err.Error()})
-		return
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec("DELETE FROM groups WHERE id=?", rawID); err != nil {
-		writeJSON(w, Response[any]{Code: 500, Message: err.Error()})
-		return
-	}
-	if _, err := tx.Exec("UPDATE profiles SET group_id=0 WHERE group_id=?", rawID); err != nil {
-		writeJSON(w, Response[any]{Code: 500, Message: err.Error()})
-		return
-	}
-	if err := tx.Commit(); err != nil {
+	if err := deleteGroupByID(req.ID); err != nil {
 		writeJSON(w, Response[any]{Code: 500, Message: err.Error()})
 		return
 	}
 	writeJSON(w, Response[any]{Code: 200, Message: "success"})
+}
+
+// deleteGroupByID removes a group and moves its profiles to the default group.
+func deleteGroupByID(idStr string) error {
+	rawID := decodeID(idStr)
+
+	// Use transaction to delete group and move its profiles to default group
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM groups WHERE id=?", rawID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("UPDATE profiles SET group_id=0 WHERE group_id=?", rawID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
