@@ -43,6 +43,9 @@ FROM ghcr.io/linuxserver/baseimage-selkies:ubuntunoble
 
 ENV TITLE=ChromiumManager
 ENV DATA_DIR=/config/data
+# 默认不注册删除类 MCP 工具；MCP_TOKEN 留空时 HTTP 传输不校验
+ENV MCP_ENABLE_DESTRUCTIVE=0
+ENV MCP_TOKEN=
 
 RUN \
   echo "**** install packages ****" && \
@@ -59,6 +62,26 @@ RUN \
 COPY --from=chromium /opt/chromium /opt/chromium
 
 COPY --from=builder /build/manager /usr/bin/manager
+
+# MCP 只监听容器内 127.0.0.1:10101，nginx 的两个 server 块（3000 http / 3001 https）
+# 都加一条 /mcp 反代，容器外才能通过映射端口访问。init-nginx 启动时会用
+# /defaults/default.conf 覆盖 /etc/nginx/sites-available/default 并做占位符替换，
+# 所以改模板即可。插在每处 error_page 之后，即各 server 块的末尾。
+RUN printf '%s\n' \
+    '  location /mcp {' \
+    '    proxy_set_header        Host $host;' \
+    '    proxy_set_header        X-Real-IP $remote_addr;' \
+    '    proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;' \
+    '    proxy_set_header        X-Forwarded-Proto $scheme;' \
+    '    proxy_http_version      1.1;' \
+    '    proxy_read_timeout      300s;' \
+    '    proxy_buffering         off;' \
+    '    client_max_body_size    8m;' \
+    '    proxy_pass              http://127.0.0.1:10101;' \
+    '  }' > /tmp/mcp-location.conf && \
+  sed -i '/error_page 500 502 503 504/r /tmp/mcp-location.conf' /defaults/default.conf && \
+  rm -f /tmp/mcp-location.conf && \
+  grep -c 'location /mcp' /defaults/default.conf
 
 COPY /root /
 
