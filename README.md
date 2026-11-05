@@ -59,7 +59,7 @@
 ```yaml
 services:
   chromium-manager:
-    image: tumi/chromium-manager:latest
+    image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
     container_name: chromium-manager
     shm_size: 1gb
     environment:
@@ -91,8 +91,11 @@ docker run -d \
   -p 3001:3001 \
   -v ./config:/config \
   --restart unless-stopped \
-  tumi/chromium-manager:latest
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
 ```
+
+镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp`，上例中的
+`156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
 
 ### 通过以下网址访问应用
 
