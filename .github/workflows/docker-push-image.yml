@@ -14,8 +14,9 @@ on:
         required: false
         type: string
         default: ''
+      # 仅为兼容 docker-image.yml 的 with: 透传而保留声明，构建流程不再读取此输入
       tag_latest:
-        description: '是否同时推送 latest 标签（默认关闭）'
+        description: '已废弃：镜像不再推送 latest 标签'
         required: false
         type: boolean
         default: false
@@ -59,11 +60,6 @@ on:
         required: false
         type: string
         default: ''
-      tag_latest:
-        description: '是否同时推送 latest（默认关闭，避免覆盖正式镜像）'
-        required: false
-        type: boolean
-        default: false
       push_ghcr:
         description: '推送到 GHCR'
         required: false
@@ -103,7 +99,6 @@ jobs:
         env:
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
-          INPUT_TAG_LATEST: ${{ inputs.tag_latest }}
           INPUT_PUSH_GHCR: ${{ inputs.push_ghcr }}
           INPUT_PUSH_ALIYUN: ${{ inputs.push_aliyun }}
           INPUT_PUSH_DOCKERHUB: ${{ inputs.push_dockerhub }}
@@ -168,20 +163,10 @@ jobs:
             exit 1
           fi
 
-          # tag 触发等同正式发布，默认也推 latest；分支构建只推分支标签，不覆盖正式镜像
-          if [ "${REF_TYPE}" = "tag" ]; then
-            tag_latest="true"
-          elif [ "${INPUT_TAG_LATEST}" = "true" ]; then
-            tag_latest="true"
-          else
-            tag_latest="false"
-          fi
-
-          echo "镜像标签：${image_tag}，二进制来源：${release_tag}，latest：${tag_latest}"
+          echo "镜像标签：${image_tag}，二进制来源：${release_tag}"
 
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
-          echo "tag_latest=${tag_latest}" >> "$GITHUB_OUTPUT"
           echo "push_ghcr=${push_ghcr}" >> "$GITHUB_OUTPUT"
           echo "push_aliyun=${push_aliyun}" >> "$GITHUB_OUTPUT"
           echo "push_dockerhub=${push_dockerhub}" >> "$GITHUB_OUTPUT"
@@ -303,7 +288,6 @@ jobs:
         id: tags
         env:
           IMAGE_TAG: ${{ steps.prep.outputs.image_tag }}
-          TAG_LATEST: ${{ steps.prep.outputs.tag_latest }}
           PUSH_GHCR: ${{ steps.prep.outputs.push_ghcr }}
           PUSH_ALIYUN: ${{ steps.prep.outputs.push_aliyun }}
           PUSH_DOCKERHUB: ${{ steps.prep.outputs.push_dockerhub }}
@@ -318,32 +302,29 @@ jobs:
 
           raw_tags=""
 
+          # 每个仓库只推两个标签：版本号 + 固定的 mcp 标签，不再推 latest
           add_tag() {
             local tag="$1"
-            if [ -n "${tag}" ]; then
-              raw_tags="${raw_tags}${tag}"$'\n'
-            fi
+            [ -n "${tag}" ] || return 0
+            case $'\n'"${raw_tags}" in
+              *$'\n'"${tag}"$'\n'*) return 0 ;;
+            esac
+            raw_tags="${raw_tags}${tag}"$'\n'
           }
 
           if [ "${PUSH_GHCR}" = "true" ]; then
             add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${IMAGE_TAG}"
-            if [ "${TAG_LATEST}" = "true" ]; then
-              add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:latest"
-            fi
+            add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:mcp"
           fi
 
           if [ "${PUSH_ALIYUN}" = "true" ]; then
             add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
-            if [ "${TAG_LATEST}" = "true" ]; then
-              add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:latest"
-            fi
+            add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:mcp"
           fi
 
           if [ "${PUSH_DOCKERHUB}" = "true" ]; then
             add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
-            if [ "${TAG_LATEST}" = "true" ]; then
-              add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
-            fi
+            add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:mcp"
           fi
 
           if [ -z "${raw_tags}" ]; then
