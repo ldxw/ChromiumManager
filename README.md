@@ -157,6 +157,11 @@ curl -k -X POST https://<宿主机>:3001/mcp -H 'Content-Type: application/json'
 `/mcp` 是容器内的绝对路径，设了 `SUBFOLDER`（子路径反代）时也不带前缀。反代只放行了
 `POST`，`GET` / `DELETE` 返回 405，请求体上限 8MB（超过返回 413）。
 
+`/mcp` 这一条 location 关了 nginx 的 Basic Auth（`auth_basic off;`）。HTTP 的
+`Authorization` 头一个请求只能带一种凭据，Basic 与 MCP 自己的 Bearer 同时开启时任何请求
+都会卡在某一层，因此 `/mcp` 只认 Bearer；Web 界面仍走 `CUSTOM_USER` / `PASSWORD`
+的 Basic Auth，两者互不影响。
+
 因为端点现在可以从容器外触达，**强烈建议设置 `MCP_TOKEN`**；不设置时任何能连到该端口的人
 都能调用全部已启用的工具。
 

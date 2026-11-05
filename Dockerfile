@@ -67,8 +67,13 @@ COPY --from=builder /build/manager /usr/bin/manager
 # 都加一条 /mcp 反代，容器外才能通过映射端口访问。init-nginx 启动时会用
 # /defaults/default.conf 覆盖 /etc/nginx/sites-available/default 并做占位符替换，
 # 所以改模板即可。插在每处 error_page 之后，即各 server 块的末尾。
+#
+# auth_basic off 是必须的：Basic 和 MCP 的 Bearer 都占用 Authorization 头，一个请求
+# 只能带一个，两者同时开启会导致任何请求都过不了其中一层。/mcp 因此只保留 Bearer
+# 鉴权（设了 MCP_TOKEN 才校验），Web 界面仍走 Basic Auth。
 RUN printf '%s\n' \
     '  location /mcp {' \
+    '    auth_basic off;' \
     '    proxy_set_header        Host $host;' \
     '    proxy_set_header        X-Real-IP $remote_addr;' \
     '    proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;' \
@@ -81,7 +86,8 @@ RUN printf '%s\n' \
     '  }' > /tmp/mcp-location.conf && \
   sed -i '/error_page 500 502 503 504/r /tmp/mcp-location.conf' /defaults/default.conf && \
   rm -f /tmp/mcp-location.conf && \
-  grep -c 'location /mcp' /defaults/default.conf
+  test "$(grep -c 'location /mcp' /defaults/default.conf)" -eq 2 && \
+  test "$(grep -c 'auth_basic off;' /defaults/default.conf)" -eq 2
 
 COPY /root /
 
