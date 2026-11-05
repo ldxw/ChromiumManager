@@ -215,3 +215,6 @@ Streamable HTTP（先正常运行程序）：
 ## 📄 许可证
 
 MIT License
+
+本项目来源、本仓库的修改，以及 Go / 前端依赖、捆绑的 Chromium 与 Docker
+基础镜像各自的许可义务，见 [NOTICE](NOTICE)。

@@ -1,0 +1,109 @@
+# 来源与第三方组件说明
+
+本文件说明 ChromiumManager 的来源、本仓库所做的修改，以及在分发源码、
+Windows 压缩包或 Docker 镜像时需要一并遵守的第三方许可义务。
+
+本文件不修改、不替代 `LICENSE`。`LICENSE` 中的 MIT 条款与
+`Copyright (c) 2026 Tumi` 声明在所有分发形式中都必须保留。
+
+---
+
+## 一、本项目来源
+
+ChromiumManager 的原始版本由 Tumi 发布，采用 MIT License
+（见仓库根目录 `LICENSE`，全文 22 行）。
+
+本仓库（`ldxw/ChromiumManager`）是在其基础上继续开发的衍生版本，
+同样以 MIT License 分发，并保留原始版权声明。
+
+## 二、本仓库的修改
+
+相对原始版本，本仓库增加或改写了以下部分：
+
+- 内置 MCP 服务器：stdio 与 HTTP（`POST /mcp`）两种传输，含浏览器控制类工具
+  （`src/mcp.go`、`src/mcp_tools.go`、`src/mcp_browser.go`、`src/mcp_http.go`）。
+- 基于 CDP 的浏览器自动化层（`src/cdp.go`、`src/cdp_client.go`）。
+- Windows 原生版本：托盘图标（`src/tray_windows.go`）、构建脚本
+  （`scripts/build-windows.sh`），产物为捆绑 Chromium 的 zip。
+- CI：二进制同步工作流改为原样搬运上游
+  `ungoogled-software/ungoogled-chromium-portablelinux` 的 `*_linux.tar.xz`；
+  镜像构建流程收敛到 `docker-push-image.yml`；新增前端只读检查。
+- Dockerfile 改为多阶段构建，从上游 tar.xz 解包 Chromium。
+
+这些修改本身同样以 MIT License 授权。
+
+## 三、第三方组件
+
+### 3.1 Go 运行时依赖（`src/go.mod`）
+
+| 组件 | 版本 | 许可证 |
+| --- | --- | --- |
+| `fyne.io/systray` | v1.12.2 | Apache-2.0 |
+| `github.com/gorilla/websocket` | v1.5.3 | BSD-3-Clause |
+| `github.com/jezek/xgb` | v1.3.0 | 以该仓库内 LICENSE 文件为准（GitHub 未识别出 SPDX 标识） |
+| `github.com/sqids/sqids-go` | v0.4.1 | MIT |
+| `modernc.org/sqlite` | v1.46.1 | BSD-3-Clause |
+
+间接依赖（`github.com/dustin/go-humanize`、`github.com/godbus/dbus/v5`、
+`github.com/google/uuid`、`github.com/mattn/go-isatty`、
+`github.com/ncruces/go-strftime`、`github.com/remyoudompheng/bigfft`、
+`golang.org/x/exp`、`golang.org/x/sys`、`modernc.org/libc`、
+`modernc.org/mathutil`、`modernc.org/memory`）来自相应上游仓库，
+以各自仓库内的 LICENSE 为准。
+
+分发编译后的二进制时，需同时提供上述组件要求保留的版权声明与许可文本。
+Apache-2.0 组件（`fyne.io/systray`）另需在存在 `NOTICE` 文件时保留其内容，
+并注明本仓库对其所做的修改（本项目未修改其源码）。
+
+### 3.2 前端依赖（`src/web/package.json`）
+
+运行期依赖 `vue`、`element-plus`、`@element-plus/icons-vue` 均为 MIT；
+开发期依赖（`vite`、`eslint`、`prettier`、`sass`、
+`unplugin-vue-components`、`@vitejs/plugin-vue`、`vite-plugin-eslint2`、
+`eslint-config-prettier`、`eslint-plugin-prettier`、`eslint-plugin-vue`）
+均为 MIT。
+
+前端构建产物内联了上述运行期依赖的代码，分发构建产物时需保留其许可声明。
+
+### 3.3 捆绑的 Chromium（Windows 压缩包）
+
+`scripts/build-windows.sh` 会从 `adryfish/fingerprint-chromium` 拉取
+`*_windows_x64.zip`，与 `ChromiumManager.exe` 一起打包为
+`release/ChromiumManager-<tag>-windows-x64.zip`，目录结构为：
+
+```
+ChromiumManager.exe
+bin/chromium/chrome.exe 等
+```
+
+该 Chromium 构建以 BSD-3-Clause 许可证分发，需保留其版权声明与许可文本，
+且不得使用作者名称为本项目的衍生产品背书。
+
+该构建基于 Chromium 项目。分发时不得使用 Google Chrome 的名称、徽标或
+其他商标暗示本项目由 Google 制作或经 Google 认可。
+
+### 3.4 Docker 基础镜像
+
+`Dockerfile` 最终阶段的基础镜像是
+`ghcr.io/linuxserver/baseimage-selkies:ubuntunoble`，其上游许可证为
+**GPL-3.0**。
+
+分发基于该基础镜像构建的 Docker 镜像时，需要按照 GPLv3 第 6 节为镜像中
+包含的 GPL 组件提供对应的源码获取方式：可以随镜像附带源码，或提供有效期
+内的书面要约，或在同一位置（镜像仓库、发布页）附带源码下载地址。
+
+这一义务只涉及基础镜像中的 GPL 组件，不影响本项目自身源码的 MIT 授权。
+
+## 四、分发检查清单
+
+按分发形态逐项核对：
+
+- **源码 / 自行编译的二进制**：保留 `LICENSE`（含 `Copyright (c) 2026 Tumi`）
+  与本文件。
+- **Windows 压缩包**：在上一项基础上，附 `adryfish/fingerprint-chromium` 的
+  BSD-3-Clause 许可文本；不得使用 Google Chrome 商标暗示官方来源。
+- **Docker 镜像**：在源码分发要求基础上，按 GPLv3 第 6 节提供
+  `baseimage-selkies` 及其内含 GPL 组件的源码获取方式。
+
+第三方组件的许可证全文以其各自仓库中的 LICENSE 文件为准，本文件只作索引，
+不复制全文。
