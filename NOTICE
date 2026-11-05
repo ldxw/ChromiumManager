@@ -1,7 +1,7 @@
 # 来源与第三方组件说明
 
-本文件说明 ChromiumManager 的来源、本仓库所做的修改，以及在分发源码、
-Windows 压缩包或 Docker 镜像时需要一并遵守的第三方许可义务。
+本文件说明 ChromiumManager 的来源、本仓库所做的修改，以及在分发源码或
+Docker 镜像时需要一并遵守的第三方许可义务。
 
 本文件不修改、不替代 `LICENSE`。`LICENSE` 中的 MIT 条款与
 `Copyright (c) 2026 Tumi` 声明在所有分发形式中都必须保留。
@@ -23,8 +23,6 @@ ChromiumManager 的原始版本由 Tumi 发布，采用 MIT License
 - 内置 MCP 服务器：stdio 与 HTTP（`POST /mcp`）两种传输，含浏览器控制类工具
   （`src/mcp.go`、`src/mcp_tools.go`、`src/mcp_browser.go`、`src/mcp_http.go`）。
 - 基于 CDP 的浏览器自动化层（`src/cdp.go`、`src/cdp_client.go`）。
-- Windows 原生版本：托盘图标（`src/tray_windows.go`）、构建脚本
-  （`scripts/build-windows.sh`），产物为捆绑 Chromium 的 zip。
 - CI：二进制同步工作流改为原样搬运上游
   `ungoogled-software/ungoogled-chromium-portablelinux` 的 `*_linux.tar.xz`；
   镜像构建流程收敛到 `docker-push-image.yml`；新增前端只读检查。
@@ -65,24 +63,7 @@ Apache-2.0 组件（`fyne.io/systray`）另需在存在 `NOTICE` 文件时保留
 
 前端构建产物内联了上述运行期依赖的代码，分发构建产物时需保留其许可声明。
 
-### 3.3 捆绑的 Chromium（Windows 压缩包）
-
-`scripts/build-windows.sh` 会从 `adryfish/fingerprint-chromium` 拉取
-`*_windows_x64.zip`，与 `ChromiumManager.exe` 一起打包为
-`release/ChromiumManager-<tag>-windows-x64.zip`，目录结构为：
-
-```
-ChromiumManager.exe
-bin/chromium/chrome.exe 等
-```
-
-该 Chromium 构建以 BSD-3-Clause 许可证分发，需保留其版权声明与许可文本，
-且不得使用作者名称为本项目的衍生产品背书。
-
-该构建基于 Chromium 项目。分发时不得使用 Google Chrome 的名称、徽标或
-其他商标暗示本项目由 Google 制作或经 Google 认可。
-
-### 3.4 Docker 基础镜像
+### 3.3 Docker 基础镜像
 
 `Dockerfile` 最终阶段的基础镜像是
 `ghcr.io/linuxserver/baseimage-selkies:ubuntunoble`，其上游许可证为
@@ -100,8 +81,6 @@ bin/chromium/chrome.exe 等
 
 - **源码 / 自行编译的二进制**：保留 `LICENSE`（含 `Copyright (c) 2026 Tumi`）
   与本文件。
-- **Windows 压缩包**：在上一项基础上，附 `adryfish/fingerprint-chromium` 的
-  BSD-3-Clause 许可文本；不得使用 Google Chrome 商标暗示官方来源。
 - **Docker 镜像**：在源码分发要求基础上，按 GPLv3 第 6 节提供
   `baseimage-selkies` 及其内含 GPL 组件的源码获取方式。
 
