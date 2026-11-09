@@ -90,9 +90,15 @@ def lower_keys(headers):
     return {key.lower(): value for key, value in headers.items()}
 
 
-def http(url, token=None, method="GET", accept=ACCEPT):
+def http(url, token=None, method="GET", accept=None):
+    """accept 默认不设：只有 manifest 请求需要那组 media type。
+
+    阿里云的令牌端点（dockerauth.<region>.aliyuncs.com/auth）只接受 JSON，
+    带上 manifest 的 Accept 会直接回 406，导致校验在申请令牌这一步就失败。
+    """
     request = urllib.request.Request(url, method=method)
-    request.add_header("Accept", accept)
+    if accept:
+        request.add_header("Accept", accept)
     if token:
         request.add_header("Authorization", token)
     try:
@@ -117,14 +123,14 @@ def token_from_challenge(challenge, host):
     basic = None
     if login:
         basic = "Basic " + base64.b64encode(("%s:%s" % login).encode()).decode()
-    code, body, _ = http(url, token=basic)
+    code, body, _ = http(url, token=basic, accept="application/json")
     if code != 200:
         fail("向 %s 申请仓库令牌失败：HTTP %s" % (host, code))
     return "Bearer " + json.loads(body)["token"]
 
 
 def fetch_manifest(base, reference, host, token):
-    code, body, headers = http("%s/manifests/%s" % (base, reference), token=token)
+    code, body, headers = http("%s/manifests/%s" % (base, reference), token=token, accept=ACCEPT)
     if code == 401 and token is None:
         challenge = headers.get("www-authenticate") or ""
         if challenge.lower().startswith("bearer"):
@@ -134,7 +140,7 @@ def fetch_manifest(base, reference, host, token):
             if not login:
                 fail("仓库要求认证，但找不到 %s 的 docker 登录信息" % host)
             token = "Basic " + base64.b64encode(("%s:%s" % login).encode()).decode()
-        code, body, headers = http("%s/manifests/%s" % (base, reference), token=token)
+        code, body, headers = http("%s/manifests/%s" % (base, reference), token=token, accept=ACCEPT)
     if code != 200:
         fail("读取 %s 失败：HTTP %s %s" % (reference, code, body[:200].decode(errors="replace")))
     return json.loads(body), token
