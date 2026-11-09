@@ -96,6 +96,12 @@ services:
 docker compose up -d
 ```
 
+`PUID` / `PGID` 填的是你宿主机用户的 `id -u` / `id -g`，上面写的 `1000` 是多数桌面发行版第一个
+普通用户的默认值，**不是镜像默认值**（镜像是 `911`，落在系统账号区间，Linux 上不对应任何真实
+用户）。这两个值**必须在第一次 `docker compose up -d` 之前定好**：基础镜像只改 `./config`
+挂载点这一层的属主，不递归，之后改值不会修好旧文件。原理与补救办法见
+「环境变量 → PUID / PGID 只能设一次」。
+
 `network_mode: bridge` 是显式写出 Docker 的默认网络模式，与 `ports` 映射配合使用。如果你要把
 容器接进自定义网络（例如让别的容器按名字访问），把这一行删掉，改用 `networks:` 指定即可，
 端口映射依然有效。
@@ -109,8 +115,8 @@ docker run -d \
   --name chromium-manager \
   --shm-size=1gb \
   --network bridge \
-  -e PUID=1000 \
-  -e PGID=1000 \
+  -e PUID=$(id -u) \
+  -e PGID=$(id -g) \
   -e TZ=Asia/Shanghai \
   -e LC_ALL=zh_CN.UTF-8 \
   -e CUSTOM_USER= \
@@ -126,6 +132,9 @@ docker run -d \
 镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp-keys`，上例中的
 `156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
 
+`-e PUID=$(id -u)` 取的是执行这条命令的用户，适合在宿主机上直接跑；在别的机器上准备
+compose 文件时，换成目标宿主机 `id -u` / `id -g` 的实际数字。
+
 ### 环境变量
 
 容器层面的变量，下表的「默认值」即镜像内的取值；`docker run -e` 或 compose 的
@@ -135,8 +144,8 @@ docker run -d \
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `PUID` | `911` | 容器内 `abc` 用户的 UID。改成宿主机用户的 `id -u`，`./config` 下的文件才会归你 |
-| `PGID` | `911` | 同上，对应 `id -g` |
+| `PUID` | `911` | 容器内 `abc` 用户的 UID，也是 `/config` 与新建文件的属主。默认的 `911` 落在系统账号区间（`100-999`），Linux 上不对应任何真实用户；第一次启动前就设成宿主机用户的 `id -u`，见下方「PUID / PGID 只能设一次」 |
+| `PGID` | `911` | 同上，对应宿主机的 `id -g`，桌面发行版上通常是 `1000` |
 | `TZ` | 空（走 UTC） | 容器时区，影响日志时间与浏览器里的本地时间，如 `Asia/Shanghai` |
 | `LC_ALL` | 空（`LANG=en_US.UTF-8`） | 容器 locale，会同步成桌面与 Chromium 的 `LANG` / `LANGUAGE`，镜像内置 `zh_CN.utf8` |
 | `CUSTOM_USER` | `abc` | Web 界面 Basic Auth 用户名，仅 `PASSWORD` 非空时生效 |
@@ -148,6 +157,41 @@ docker run -d \
 `PUID` / `PGID` / `TZ` / `LC_ALL` / `CUSTOM_USER` / `PASSWORD` / `TITLE` / `NO_DECOR` 由继承的
 linuxserver 基础镜像处理。MCP 相关变量（`MCP_TOKEN`、`MCP_KEYS` 等）见
 「🤖 MCP 支持 → MCP 环境变量」。
+
+#### PUID / PGID 只能设一次
+
+`PUID` / `PGID` 决定容器内 `abc` 用户的 UID / GID，也是挂载的 `./config` 的属主。基础镜像
+启动时只把**挂载点这一层**改过去，不会递归处理里面的文件：
+
+```bash
+lsiown abc:abc /config      # 等价于 find /config -maxdepth 0 -exec chown ...
+```
+
+所以：
+
+- `./config` 本身会变成你设的 UID / GID，之后程序新建的文件（`data.db`、`profiles/` 等）
+  也归你；
+- `./config` 里**启动前就有的旧文件**保持原属主不动。
+
+这带来两个后果，都和「改小 / 改回默认」有关：
+
+1. **先按 `PUID=1000` 跑过，再改回默认 `911`，程序会写不了库。** `data.db` 属主是 1000、
+   权限 644，`data/` 目录也是 1000 且不是 777，`abc`（911）既改不了文件也建不了新文件，
+   日志里出现 `Permission denied`，管理界面读不到数据。
+2. **反过来，从 `911` 改成 `1000` 同样不会自动修好旧文件**，因为它们不在递归范围内。
+
+`PUID` 要在**第一次 `docker compose up` 之前**就按宿主机用户定好：
+
+```bash
+id -u   # 填给 PUID
+id -g   # 填给 PGID
+```
+
+已经设错、需要换归属时，在宿主机上手动递归改一次，之后保持这个值不变：
+
+```bash
+sudo chown -R "$(id -u):$(id -g)" ./config
+```
 
 ### Web 界面登录
 
