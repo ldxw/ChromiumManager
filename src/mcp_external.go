@@ -48,8 +48,8 @@ func startMCPExternalServer(s *mcpServer) {
 
 	mcpExtServer = &http.Server{Addr: addr, Handler: withMiddleware(mux)}
 
-	if mcpToken() == "" {
-		log.Printf("[MCP] WARNING: 外部端口 %s 未设置 MCP_TOKEN，"+
+	if !mcpKeys.enabled() && mcpToken() == "" {
+		log.Printf("[MCP] WARNING: 外部端口 %s 未设置 MCP_TOKEN 也未设置 MCP_KEYS，"+
 			"任何能连到该端口的人都可调用全部已启用工具", addr)
 	}
 

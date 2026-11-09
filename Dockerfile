@@ -46,6 +46,12 @@ ENV DATA_DIR=/config/data
 # 默认不注册删除类 MCP 工具；MCP_TOKEN 留空时 HTTP 传输不校验
 ENV MCP_ENABLE_DESTRUCTIVE=0
 ENV MCP_TOKEN=
+# 多 key 绑定，形如 {"key1":"窗口1","key2":"窗口2"}；设置后每个 key 只能操作自己那个配置。
+# 也可以用 MCP_KEYS_FILE 指向一个 JSON 文件（MCP_KEYS 优先）。
+ENV MCP_KEYS=
+ENV MCP_KEYS_FILE=
+# 自动创建配置时使用的分组名
+ENV MCP_GROUP_NAME=mcp
 # 外部 MCP 监听地址，容器外可直接连；设为 off 关闭
 ENV MCP_HTTP_ADDR=0.0.0.0:10102
 # Chromium 沙箱：auto 按容器 seccomp 状态判断，1 强制启用，0 强制关闭。
@@ -75,7 +81,7 @@ COPY --from=builder /build/manager /usr/bin/manager
 #
 # auth_basic off 是必须的：Basic 和 MCP 的 Bearer 都占用 Authorization 头，一个请求
 # 只能带一个，两者同时开启会导致任何请求都过不了其中一层。/mcp 因此只保留 Bearer
-# 鉴权（设了 MCP_TOKEN 才校验），Web 界面仍走 Basic Auth。
+# 鉴权（设了 MCP_KEYS 或 MCP_TOKEN 才校验），Web 界面仍走 Basic Auth。
 RUN printf '%s\n' \
     '  location /mcp {' \
     '    auth_basic off;' \

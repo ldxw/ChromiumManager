@@ -214,6 +214,7 @@ func registerBrowserTools(s *mcpServer) {
 		},
 		Handler: toolScreenshot,
 	}
+	// 绑定 key 下的描述与 schema 由 boundToolPresentation 覆写：不落盘、去掉 path。
 
 	s.tools["eval_js"] = mcpTool{
 		Name: "eval_js",
@@ -222,8 +223,8 @@ func registerBrowserTools(s *mcpServer) {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id":         map[string]any{"type": "string", "description": "配置 _id"},
-				"expression": map[string]any{"type": "string", "description": "JS 表达式，返回值需可 JSON 序列化"},
+				"id":           map[string]any{"type": "string", "description": "配置 _id"},
+				"expression":   map[string]any{"type": "string", "description": "JS 表达式，返回值需可 JSON 序列化"},
 				"awaitPromise": map[string]any{"type": "boolean", "description": "表达式返回 Promise 时是否等待，默认 true"},
 			},
 			"required": []string{"id", "expression"},
@@ -243,6 +244,21 @@ func normalizeURL(u string) string {
 		return u
 	}
 	return "https://" + u
+}
+
+// normalizeURLScoped 是绑定 key 的版本：只允许 http/https。
+// file:// 能读整份 data.db（含全部 cookie 与代理凭据），chrome://、data:、
+// javascript: 也都能绕出页面边界，对外部使用方一律不开放。
+func normalizeURLScoped(u string) (string, error) {
+	target := normalizeURL(u)
+	if target == "" {
+		return "", errors.New("url 不能为空")
+	}
+	lower := strings.ToLower(target)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return target, nil
+	}
+	return "", fmt.Errorf("只允许 http:// 和 https:// 地址，收到：%s", target)
 }
 
 func currentPageInfo(sess cdpSession) (string, string, error) {
@@ -271,7 +287,7 @@ func currentPageInfo(sess cdpSession) (string, string, error) {
 	return info.URL, info.Title, nil
 }
 
-func toolNavigate(args json.RawMessage) (any, error) {
+func toolNavigate(ctx context.Context, args json.RawMessage) (any, error) {
 	var a struct {
 		ID      string `json:"id"`
 		URL     string `json:"url"`
@@ -280,10 +296,25 @@ func toolNavigate(args json.RawMessage) (any, error) {
 	if err := decodeArgs(args, &a); err != nil {
 		return nil, err
 	}
-	target := normalizeURL(a.URL)
-	if target == "" {
-		return nil, errors.New("url 不能为空")
+
+	profileID, err := resolveTarget(ctx, a.ID)
+	if err != nil {
+		return nil, err
 	}
+
+	var target string
+	if bindingFrom(ctx) != nil {
+		target, err = normalizeURLScoped(a.URL)
+	} else {
+		target = normalizeURL(a.URL)
+		if target == "" {
+			err = errors.New("url 不能为空")
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
 	wait := a.Timeout
 	if wait <= 0 {
 		wait = 15000
@@ -292,7 +323,6 @@ func toolNavigate(args json.RawMessage) (any, error) {
 		wait = 60000
 	}
 
-	profileID := a.ID
 	sess, err := getCDPSession(profileID)
 	if err != nil {
 		return nil, err
@@ -387,7 +417,7 @@ func evalString(sess cdpSession, expr string) (string, error) {
 	}
 }
 
-func toolReadPage(args json.RawMessage) (any, error) {
+func toolReadPage(ctx context.Context, args json.RawMessage) (any, error) {
 	var a struct {
 		ID       string `json:"id"`
 		Selector string `json:"selector"`
@@ -396,14 +426,15 @@ func toolReadPage(args json.RawMessage) (any, error) {
 	if err := decodeArgs(args, &a); err != nil {
 		return nil, err
 	}
-	if a.ID == "" {
-		return nil, errors.New("id 不能为空")
+	profileID, err := resolveTarget(ctx, a.ID)
+	if err != nil {
+		return nil, err
 	}
 	if a.MaxChars <= 0 {
 		a.MaxChars = 8000
 	}
 
-	sess, err := getCDPSession(a.ID)
+	sess, err := getCDPSession(profileID)
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +450,7 @@ func toolReadPage(args json.RawMessage) (any, error) {
 
 	text, err := evalString(*sess, expr)
 	if err != nil {
-		resetSession(a.ID)
+		resetSession(profileID)
 		return nil, err
 	}
 	var parsed struct {
@@ -453,7 +484,7 @@ func jsString(s string) string {
 	return string(b)
 }
 
-func toolClick(args json.RawMessage) (any, error) {
+func toolClick(ctx context.Context, args json.RawMessage) (any, error) {
 	var a struct {
 		ID       string `json:"id"`
 		Selector string `json:"selector"`
@@ -464,7 +495,11 @@ func toolClick(args json.RawMessage) (any, error) {
 	if a.Selector == "" {
 		return nil, errors.New("selector 不能为空")
 	}
-	sess, err := getCDPSession(a.ID)
+	profileID, err := resolveTarget(ctx, a.ID)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := getCDPSession(profileID)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +513,7 @@ func toolClick(args json.RawMessage) (any, error) {
 
 	res, err := evalString(*sess, expr)
 	if err != nil {
-		resetSession(a.ID)
+		resetSession(profileID)
 		return nil, err
 	}
 	if res == "missing" {
@@ -487,7 +522,7 @@ func toolClick(args json.RawMessage) (any, error) {
 	return map[string]any{"clicked": a.Selector}, nil
 }
 
-func toolFill(args json.RawMessage) (any, error) {
+func toolFill(ctx context.Context, args json.RawMessage) (any, error) {
 	var a struct {
 		ID       string `json:"id"`
 		Selector string `json:"selector"`
@@ -500,7 +535,11 @@ func toolFill(args json.RawMessage) (any, error) {
 	if a.Selector == "" {
 		return nil, errors.New("selector 不能为空")
 	}
-	sess, err := getCDPSession(a.ID)
+	profileID, err := resolveTarget(ctx, a.ID)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := getCDPSession(profileID)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +567,7 @@ func toolFill(args json.RawMessage) (any, error) {
 
 	res, err := evalString(*sess, expr)
 	if err != nil {
-		resetSession(a.ID)
+		resetSession(profileID)
 		return nil, err
 	}
 	if res == "missing" {
@@ -537,7 +576,7 @@ func toolFill(args json.RawMessage) (any, error) {
 	return map[string]any{"filled": a.Selector, "submitted": a.Submit}, nil
 }
 
-func toolScreenshot(args json.RawMessage) (any, error) {
+func toolScreenshot(ctx context.Context, args json.RawMessage) (any, error) {
 	var a struct {
 		ID       string `json:"id"`
 		Selector string `json:"selector"`
@@ -547,10 +586,12 @@ func toolScreenshot(args json.RawMessage) (any, error) {
 	if err := decodeArgs(args, &a); err != nil {
 		return nil, err
 	}
-	if a.ID == "" {
-		return nil, errors.New("id 不能为空")
+	profileID, err := resolveTarget(ctx, a.ID)
+	if err != nil {
+		return nil, err
 	}
-	sess, err := getCDPSession(a.ID)
+	bound := bindingFrom(ctx) != nil
+	sess, err := getCDPSession(profileID)
 	if err != nil {
 		return nil, err
 	}
@@ -574,7 +615,7 @@ func toolScreenshot(args json.RawMessage) (any, error) {
 })()`, jsString(a.Selector))
 		box, err := evalString(*sess, expr)
 		if err != nil {
-			resetSession(a.ID)
+			resetSession(profileID)
 			return nil, err
 		}
 		if box == "" {
@@ -592,14 +633,14 @@ func toolScreenshot(args json.RawMessage) (any, error) {
 		params["clip"] = map[string]any{"x": r.X, "y": r.Y, "width": r.Width, "height": r.Height, "scale": 1}
 		raw, err = sess.call(ctx, "Page.captureScreenshot", params)
 		if err != nil {
-			resetSession(a.ID)
+			resetSession(profileID)
 			return nil, err
 		}
 	} else {
 		var err error
 		raw, err = sess.call(ctx, "Page.captureScreenshot", params)
 		if err != nil {
-			resetSession(a.ID)
+			resetSession(profileID)
 			return nil, err
 		}
 	}
@@ -615,13 +656,25 @@ func toolScreenshot(args json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("解码截图失败：%v", err)
 	}
 
+	// 绑定 key 一律只回图片内容：既不落盘，也不接受调用方指定的 path。
+	if bound {
+		url, title, _ := currentPageInfo(*sess)
+		return mcpImageResult{
+			Data:     shot.Data,
+			MimeType: "image/png",
+			URL:      url,
+			Title:    title,
+			Bytes:    len(png),
+		}, nil
+	}
+
 	path := a.Path
 	if path == "" {
 		dir := filepath.Join(dataDir, "screenshots")
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("创建截图目录失败：%v", err)
 		}
-		path = filepath.Join(dir, fmt.Sprintf("%s-%d.png", safeFilePart(a.ID), time.Now().UnixMilli()))
+		path = filepath.Join(dir, fmt.Sprintf("%s-%d.png", safeFilePart(profileID), time.Now().UnixMilli()))
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -661,7 +714,7 @@ func safeFilePart(s string) string {
 	return b.String()
 }
 
-func toolEvalJS(args json.RawMessage) (any, error) {
+func toolEvalJS(ctx context.Context, args json.RawMessage) (any, error) {
 	var a struct {
 		ID           string `json:"id"`
 		Expression   string `json:"expression"`
@@ -673,7 +726,11 @@ func toolEvalJS(args json.RawMessage) (any, error) {
 	if strings.TrimSpace(a.Expression) == "" {
 		return nil, errors.New("expression 不能为空")
 	}
-	sess, err := getCDPSession(a.ID)
+	profileID, err := resolveTarget(ctx, a.ID)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := getCDPSession(profileID)
 	if err != nil {
 		return nil, err
 	}
@@ -691,7 +748,7 @@ func toolEvalJS(args json.RawMessage) (any, error) {
 		"awaitPromise":  await,
 	})
 	if err != nil {
-		resetSession(a.ID)
+		resetSession(profileID)
 		return nil, err
 	}
 

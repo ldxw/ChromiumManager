@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
@@ -14,8 +15,8 @@ import (
 // 响应是 application/json 的单个 JSON-RPC 响应。不支持服务端主动推送，
 // 因此 GET /mcp 返回 405（协议允许在无推送能力时这样做）。
 //
-// 鉴权：设置了 MCP_TOKEN 时要求 Authorization: Bearer <token>；
-// 未设置时不做校验（服务默认只监听 127.0.0.1）。
+// 鉴权：设置了 MCP_KEYS 时按 key 查表，命中的请求携带该 key 的绑定信息；
+// 未设置 MCP_KEYS 时退回 MCP_TOKEN，未设置 MCP_TOKEN 则不做校验。
 
 const mcpMaxBody = 8 << 20
 
@@ -23,26 +24,51 @@ func mcpToken() string {
 	return strings.TrimSpace(os.Getenv("MCP_TOKEN"))
 }
 
-func mcpAuthorized(r *http.Request) bool {
-	token := mcpToken()
-	if token == "" {
-		return true
-	}
+// mcpAuthorized 返回请求对应的绑定。第二个返回 false 表示未通过鉴权。
+// 绑定为 nil 表示这是不受限的 MCP_TOKEN 通道（或未启用鉴权）。
+func mcpAuthorized(r *http.Request) (*mcpBinding, bool) {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
-	if !strings.HasPrefix(h, prefix) {
-		return false
+	var got string
+	if strings.HasPrefix(h, prefix) {
+		got = strings.TrimSpace(h[len(prefix):])
 	}
-	got := strings.TrimSpace(h[len(prefix):])
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+
+	if mcpKeys.enabled() {
+		if got == "" {
+			return nil, false
+		}
+		b, ok := mcpKeys.lookup(got)
+		if !ok {
+			return nil, false
+		}
+		return b, true
+	}
+
+	token := mcpToken()
+	if token == "" {
+		return nil, true
+	}
+	if got == "" {
+		return nil, false
+	}
+	if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		return nil, false
+	}
+	return nil, true
 }
 
 func mcpHTTPHandler(s *mcpServer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !mcpAuthorized(r) {
+		binding, ok := mcpAuthorized(r)
+		if !ok {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
+		}
+		ctx := r.Context()
+		if binding != nil {
+			ctx = context.WithValue(ctx, mcpBindingCtxKey{}, binding)
 		}
 
 		switch r.Method {
@@ -92,7 +118,7 @@ func mcpHTTPHandler(s *mcpServer) http.HandlerFunc {
 			}
 			out := make([]*rpcResponse, 0, len(batch))
 			for _, raw := range batch {
-				if resp := s.handle(raw); resp != nil {
+				if resp := s.handle(ctx, raw); resp != nil {
 					out = append(out, resp)
 				}
 			}
@@ -107,7 +133,7 @@ func mcpHTTPHandler(s *mcpServer) http.HandlerFunc {
 			return
 		}
 
-		resp := s.handle([]byte(trimmed))
+		resp := s.handle(ctx, []byte(trimmed))
 		if resp == nil {
 			// 通知：协议规定返回 202 且无响应体。
 			w.WriteHeader(http.StatusAccepted)

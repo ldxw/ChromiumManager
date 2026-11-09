@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,11 +47,12 @@ type rpcResponse struct {
 }
 
 // mcpTool 是一个工具定义 + 处理器。args 是 tools/call 里的 arguments 原文。
+// ctx 里带当前请求的 key 绑定（HTTP 传输时），stdio 下为 Background。
 type mcpTool struct {
 	Name        string
 	Description string
 	InputSchema map[string]any
-	Handler     func(args json.RawMessage) (any, error)
+	Handler     func(ctx context.Context, args json.RawMessage) (any, error)
 }
 
 type mcpServer struct {
@@ -85,7 +87,7 @@ func (s *mcpServer) toolNames() []string {
 }
 
 // handle 处理单条 JSON-RPC 报文。返回 nil 表示这是通知、不应回复。
-func (s *mcpServer) handle(line []byte) *rpcResponse {
+func (s *mcpServer) handle(ctx context.Context, line []byte) *rpcResponse {
 	var req rpcRequest
 	if err := json.Unmarshal(line, &req); err != nil {
 		return &rpcResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: rpcParseError, Message: "parse error: " + err.Error()}}
@@ -100,7 +102,7 @@ func (s *mcpServer) handle(line []byte) *rpcResponse {
 		return &rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: rpcInvalidRequest, Message: "invalid JSON-RPC 2.0 request"}}
 	}
 
-	result, rerr := s.dispatch(req.Method, req.Params)
+	result, rerr := s.dispatch(ctx, req.Method, req.Params)
 	if isNotification {
 		if rerr != nil {
 			log.Printf("[MCP] notification %s failed: %s", req.Method, rerr.Message)
@@ -116,17 +118,24 @@ func (s *mcpServer) handle(line []byte) *rpcResponse {
 	return resp
 }
 
-func (s *mcpServer) dispatch(method string, params json.RawMessage) (any, *rpcError) {
+func (s *mcpServer) dispatch(ctx context.Context, method string, params json.RawMessage) (any, *rpcError) {
+	binding := bindingFrom(ctx)
+
 	switch method {
 	case "initialize":
+		instructions := "ChromiumManager 指纹浏览器管理。先用 list_profiles 找 _id，" +
+			"launch_profile / stop_profile 控制实例，navigate / read_page 操作页面。"
+		if binding != nil {
+			instructions = fmt.Sprintf("ChromiumManager 指纹浏览器管理。当前 key 已绑定到配置「%s」，"+
+				"工具里的 id 可以省略，省略即操作该配置；不能操作其他配置。", binding.name)
+		}
 		return map[string]any{
 			"protocolVersion": mcpProtocolVersion,
 			"capabilities": map[string]any{
 				"tools": map[string]any{"listChanged": false},
 			},
-			"serverInfo": map[string]any{"name": s.name, "version": s.version},
-			"instructions": "ChromiumManager 指纹浏览器管理。先用 list_profiles 找 _id，" +
-				"launch_profile / stop_profile 控制实例，navigate / read_page 操作页面。",
+			"serverInfo":   map[string]any{"name": s.name, "version": s.version},
+			"instructions": instructions,
 		}, nil
 
 	case "notifications/initialized":
@@ -138,11 +147,18 @@ func (s *mcpServer) dispatch(method string, params json.RawMessage) (any, *rpcEr
 	case "tools/list":
 		list := make([]map[string]any, 0, len(s.tools))
 		for _, name := range s.toolNames() {
+			if binding != nil && !bindingAllows(name) {
+				continue
+			}
 			t := s.tools[name]
+			schema, desc := t.InputSchema, t.Description
+			if binding != nil {
+				schema, desc = boundToolPresentation(name, t)
+			}
 			list = append(list, map[string]any{
 				"name":        t.Name,
-				"description": t.Description,
-				"inputSchema": t.InputSchema,
+				"description": desc,
+				"inputSchema": schema,
 			})
 		}
 		return map[string]any{"tools": list}, nil
@@ -159,17 +175,44 @@ func (s *mcpServer) dispatch(method string, params json.RawMessage) (any, *rpcEr
 		if !ok {
 			return nil, &rpcError{Code: rpcInvalidParams, Message: "unknown tool: " + p.Name}
 		}
+		if binding != nil && !bindingAllows(p.Name) {
+			// 绑定 key 看不到的工具一律按不存在处理，不透露还有哪些管理能力。
+			return nil, &rpcError{Code: rpcInvalidParams, Message: "unknown tool: " + p.Name}
+		}
 		if len(p.Arguments) == 0 {
 			p.Arguments = json.RawMessage("{}")
 		}
-		out, err := t.Handler(p.Arguments)
+		out, err := t.Handler(ctx, p.Arguments)
 		if err != nil {
 			return toolErrorResult(err.Error()), nil
+		}
+		if img, ok := out.(mcpImageResult); ok {
+			return img.toolResult(), nil
 		}
 		return toolTextResult(out), nil
 	}
 
 	return nil, &rpcError{Code: rpcMethodNotFound, Message: "method not found: " + method}
+}
+
+// mcpImageResult 让工具直接回一条 MCP image content，
+// 客户端按协议把 base64 当成图片渲染，不需要再读文件。
+type mcpImageResult struct {
+	Data     string // base64，不带 data: 前缀
+	MimeType string
+	URL      string
+	Title    string
+	Bytes    int
+}
+
+func (r mcpImageResult) toolResult() map[string]any {
+	return map[string]any{
+		"content": []map[string]any{
+			{"type": "image", "data": r.Data, "mimeType": r.MimeType},
+			{"type": "text", "text": fmt.Sprintf("PNG %d 字节\nURL: %s\n标题: %s", r.Bytes, r.URL, r.Title)},
+		},
+		"isError": false,
+	}
 }
 
 // toolTextResult 把任意值序列化成一条 text content。字符串原样输出。
@@ -213,7 +256,7 @@ func (s *mcpServer) serveStdio(in io.Reader, out io.Writer) error {
 		if line == "" {
 			continue
 		}
-		resp := s.handle([]byte(line))
+		resp := s.handle(context.Background(), []byte(line))
 		if resp == nil {
 			continue
 		}

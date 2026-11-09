@@ -77,6 +77,9 @@ services:
       # MCP 相关，按需开启，详见「🤖 MCP 支持」
       - MCP_ENABLE_DESTRUCTIVE=0
       # - MCP_TOKEN=换成你自己的随机串
+      # - MCP_KEYS={"key1":"窗口1","key2":"窗口2"}
+      # - MCP_KEYS_FILE=/config/mcp-keys.json
+      # - MCP_GROUP_NAME=mcp
       # - MCP_HTTP_ADDR=0.0.0.0:10102
       # Chromium 沙箱，auto 为默认行为；改成 1 还需配合 seccomp 放开
       # - CHROME_SANDBOX=auto
@@ -228,8 +231,9 @@ curl -k -X POST https://<宿主机>:3001/mcp -H 'Content-Type: application/json'
 都会卡在某一层，因此 `/mcp` 只认 Bearer；Web 界面仍走由 `PASSWORD` 启用的 Basic Auth
 （用户名 `CUSTOM_USER`），两者互不影响。
 
-因为端点现在可以从容器外触达，**强烈建议设置 `MCP_TOKEN`**；不设置时任何能连到该端口的人
-都能调用全部已启用的工具。
+因为端点现在可以从容器外触达，**强烈建议设置 `MCP_TOKEN` 或 `MCP_KEYS`**；两个都不设时任何
+能连到该端口的人都能调用全部已启用的工具。要把端点交给外部使用方，用 `MCP_KEYS` 给每人分配
+一个 key 和一个配置，见「多 key 绑定」。
 
 ### 外部直连端口
 
@@ -284,11 +288,66 @@ Streamable HTTP（先正常运行程序）：
 | `DATA_DIR` | 数据目录，默认为 `./data` |
 | `MCP_ENABLE_DESTRUCTIVE` | 设为 `1` 才注册删除类工具（`delete_profile` / `delete_proxy` / `delete_group` / `stop_all_profiles`） |
 | `MCP_TOKEN` | 仅 HTTP 传输生效；设置后要求 `Authorization: Bearer <token>`，未设置不校验。反代与外部端口都在容器外可触达，建议始终设置 |
+| `MCP_KEYS` | 多 key 绑定，JSON 对象，见「多 key 绑定」。设置后优先于 `MCP_TOKEN` |
+| `MCP_KEYS_FILE` | 从文件读取上面那份 JSON；与 `MCP_KEYS` 同时设置时以 `MCP_KEYS` 为准 |
+| `MCP_GROUP_NAME` | 自动创建配置时用的分组名，默认 `mcp` |
 | `MCP_HTTP_ADDR` | 外部直连监听地址，默认 `0.0.0.0:10102`；设为 `127.0.0.1:10102` 仅本机可用，设为 `off` 关闭 |
 | `CHROME_SANDBOX` | 控制 Chromium 沙箱，见下方说明，默认 `auto` |
 
 需要 HTTP 传输鉴权时，在 `docker run` 里再加 `-e MCP_TOKEN=<随机串>`（compose 中放开被注释的那行），
 客户端请求必须带 `Authorization: Bearer <随机串>`，否则返回 401。
+
+### 多 key 绑定
+
+把 MCP 端点交给外部使用方（不同人、不同 AI 客户端）时，用 `MCP_KEYS` 给每个使用方分配一个 key
+和它专属的浏览器配置。每个 key 只能看到、只能操作自己那个配置：
+
+```bash
+docker run -d --name chromium-manager \
+  -e MCP_KEYS='{"key1":"窗口1","key2":"窗口2"}' \
+  -e MCP_GROUP_NAME=mcp \
+  -p 10102:10102 \
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
+```
+
+也可以用文件，适合 value 里含特殊字符或 key 较多的情况（`MCP_KEYS` 与 `MCP_KEYS_FILE` 同时设置时
+前者优先）：
+
+```bash
+-e MCP_KEYS_FILE=/config/mcp-keys.json
+```
+
+```json
+{"key1": "窗口1", "key2": "窗口2"}
+```
+
+JSON 的 value 就是配置名。启动时程序会：
+
+1. 取 `MCP_GROUP_NAME`（默认 `mcp`），按名字取分组，没有就建；
+2. 在该分组下按 value 找配置，没有就建一个（自动分配随机指纹种子），**只创建不启动**；
+3. 建立 key → 配置 的内存映射，日志里只打印 key 前 4 位。
+
+客户端照常 `Authorization: Bearer key1` 即可。绑定生效后：
+
+| 行为 | 说明 |
+| --- | --- |
+| `id` 可省略 | `get_profile` / `launch_profile` / `stop_profile` / 6 个浏览器工具缺省即操作绑定配置 |
+| 传别人的 `id` | 直接拒绝：`当前 key 已绑定到配置「窗口1」，不能操作其他配置` |
+| `list_profiles` / `list_running` / `list_groups` | 只返回自己那条（`list_running` 不含别人的 pid 与 DevTools 地址） |
+| `list_proxies` | 不返回 `url`（里面带账号密码），只给 ip / 语言 / 时区 / 位置 |
+| `add_profile` / `update_profile` / 删除类工具 | 不注册，`tools/list` 看不到，调用返回 unknown tool |
+| `screenshot` | 忽略 `path`，直接返回 MCP `image` 内容（PNG base64），不写文件 |
+| `navigate` | 只允许 `http://` 与 `https://`，`file://` / `chrome://` / `data:` / `javascript:` 一律拒绝 |
+
+`file://` 之所以必须堵掉：容器里 `/config/data/data.db` 是整份 SQLite 库，`file://` 加 `read_page`
+就能把所有配置的 cookie 与代理凭据读出来。
+
+绑定配置如果在 Web 界面里被改名或删除，该 key 的请求会返回
+`绑定的配置已不存在或被重命名，请重启容器以按 MCP_KEYS 重新创建`，不会自动重建——
+自动重建会让外部使用方悄悄换到一个新环境。重启容器后启动逻辑会重新按名称校正。
+
+两个 key 绑同一个配置名、key 或配置名为空，都会在启动时打印具体原因并让进程退出，不带着半套
+绑定对外服务。stdin 传输（`--mcp-stdio`）不读 `MCP_KEYS`，行为与以前一样。
 
 #### Chromium 沙箱
 
@@ -315,9 +374,10 @@ docker run -d --name chromium-manager \
 注意 `seccomp=unconfined` 会让整个容器失去 seccomp 过滤，不只是 Chromium。若只是想消掉那条
 提示条、不打算真的开沙箱，把 `CHROME_SANDBOX` 保持 `auto` 并在配置的启动参数里加 `--test-type`。
 
-镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空）、`MCP_HTTP_ADDR=0.0.0.0:10102`、
-`CHROME_SANDBOX=auto`，`docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在
-进程或浏览器启动时读取，MCP 相关的改了要重启容器才生效。
+镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空）、`MCP_KEYS=`（空）、
+`MCP_KEYS_FILE=`（空）、`MCP_GROUP_NAME=mcp`、`MCP_HTTP_ADDR=0.0.0.0:10102`、`CHROME_SANDBOX=auto`，
+`docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在进程或浏览器启动时读取，
+MCP 相关的改了要重启容器才生效。
 
 ### 工具列表
 

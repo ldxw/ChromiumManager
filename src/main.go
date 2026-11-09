@@ -269,6 +269,9 @@ func startServer() {
 	// MCP over Streamable HTTP。不限定方法，由 handler 自己回 405 + Allow，
 	// 这样 GET/DELETE 也能走到鉴权和 Allow 逻辑。
 	// 同一个实例也挂到外部监听端口，两处共用工具注册结果。
+	if err := initMCPKeys(); err != nil {
+		log.Fatalf("[MCP] 初始化 key 绑定失败：%v", err)
+	}
 	mcpSrv := newMCPServer()
 	mux.Handle("/mcp", mcpHTTPHandler(mcpSrv))
 
