@@ -20,6 +20,10 @@ services:
 
     environment:
       # ---------- 基础 ----------
+      # PUID / PGID：容器内 abc 用户的 UID / GID，也是 ./config 的属主。
+      # 1000 是多数桌面发行版第一个普通用户的 uid，请换成自己的 id -u / id -g。
+      # 镜像默认的 911 落在系统账号区间（100-999），Linux 上不对应任何真实用户。
+      # 必须在第一次 up 之前定好：基础镜像只改 ./config 这一层不递归，之后改值不会修好旧文件。
       - PUID=1000
       - PGID=1000
       - TZ=Asia/Shanghai
