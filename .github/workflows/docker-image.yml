@@ -1,5 +1,7 @@
-name: Docker Image CI
+name: 构建并推送 Docker 镜像
 
+# 只做一件事：从 Release 取 Chromium 二进制，构建多架构镜像并推到 GHCR。
+# 镜像地址固定为 ghcr.io/<owner>/chromium-manager:<版本号>-mcp，不推 latest。
 on:
   workflow_dispatch:
     inputs:
@@ -9,49 +11,225 @@ on:
         type: string
         default: ''
       image_tag:
-        description: '镜像标签，留空则 tag 触发用该 tag、分支触发用分支名'
+        description: '镜像标签（不含 -mcp 后缀），留空则跟随 Release 标签'
         required: false
         type: string
         default: ''
-      tag_latest:
-        description: '是否同时推送 latest（分支触发默认不推）'
-        required: false
-        type: boolean
-        default: false
-      push_ghcr:
-        description: '推送到 GHCR'
-        required: false
-        type: boolean
-        default: false
-      push_aliyun:
-        description: '推送到阿里云镜像仓库'
-        required: false
-        type: boolean
-        default: false
-      push_dockerhub:
-        description: '推送到 Docker Hub'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  # 按 ref 分组，分支构建不会挤占 tag / 主干的构建队列
+  # 按 ref 分组，分支构建不会挤占 tag 的构建队列
   group: docker-image-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # 复用主构建流程：二进制默认取最新 Release，镜像标签跟随当前 ref
   docker:
-    uses: ./.github/workflows/docker-push-image.yml
-    with:
-      release_tag: ${{ inputs.release_tag }}
-      image_tag: ${{ inputs.image_tag }}
-      tag_latest: ${{ inputs.tag_latest }}
-      push_ghcr: ${{ inputs.push_ghcr }}
-      push_aliyun: ${{ inputs.push_aliyun }}
-      push_dockerhub: ${{ inputs.push_dockerhub }}
-    secrets: inherit
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v5
+
+      - name: 解析构建参数
+        id: prep
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          repo="${GITHUB_REPOSITORY}"
+          owner_lc="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          image_name="chromium-manager"
+
+          sanitize_tag() {
+            printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[-.]+//; s/[-.]+$//' \
+              | cut -c1-120
+          }
+
+          # 二进制来源：显式指定 > tag 触发用该 tag > 否则取最新正式 Release
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            release_tag="${INPUT_RELEASE_TAG}"
+            echo "使用手动指定的二进制来源 Release：${release_tag}"
+          elif [ "${REF_TYPE}" = "tag" ]; then
+            release_tag="${REF_NAME}"
+            echo "tag 触发，二进制来源使用当前 tag：${release_tag}"
+          else
+            release_tag="$(gh api "repos/${repo}/releases/latest" --jq '.tag_name')"
+            echo "分支触发，二进制来源自动使用最新正式 Release：${release_tag}"
+          fi
+
+          if [ -z "${release_tag}" ] || [ "${release_tag}" = "null" ]; then
+            echo "无法确定 Release 标签，请确认仓库存在正式 Release 或手动指定 release_tag"
+            exit 1
+          fi
+
+          # 镜像标签：显式指定 > 跟随二进制来源的 Release 标签
+          if [ -n "${INPUT_IMAGE_TAG}" ]; then
+            image_tag="$(sanitize_tag "${INPUT_IMAGE_TAG}")"
+            echo "使用手动指定的镜像标签：${image_tag}"
+          else
+            image_tag="$(sanitize_tag "${release_tag}")"
+            echo "镜像标签跟随二进制来源：${image_tag}"
+          fi
+
+          if [ -z "${image_tag}" ]; then
+            echo "镜像标签为空，请检查 Release 标签或手动指定 image_tag"
+            exit 1
+          fi
+
+          echo "镜像标签：${image_tag}-mcp，二进制来源：${release_tag}"
+
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+          echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
+          echo "image_name=${image_name}" >> "$GITHUB_OUTPUT"
+
+      - name: 从 Release 下载 Chromium 二进制
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.prep.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "开始下载 Release 附件：${RELEASE_TAG}"
+
+          # 附件名与上游一致：ungoogled-chromium-<ver>-<rev>-<arch>_linux.tar.xz
+          # 先列附件再下载，缺包时打印实际内容，避免 gh 直接以非零退出吞掉原因
+          if ! names="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+                 --json assets --jq '.assets[].name')"; then
+            echo "读取 Release ${RELEASE_TAG} 失败，请确认标签存在且工作流有 contents: read 权限"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          mapfile -t all_names <<< "${names}"
+          if [ "${#all_names[@]}" -eq 1 ] && [ -z "${all_names[0]}" ]; then
+            all_names=()
+          fi
+
+          pkgs=()
+          for name in "${all_names[@]}"; do
+            case "${name}" in
+              ungoogled-chromium-*_linux.tar.xz) pkgs+=("${name}") ;;
+            esac
+          done
+
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "Release ${RELEASE_TAG} 中没有 *_linux.tar.xz 附件，现有附件："
+            if [ "${#all_names[@]}" -eq 0 ]; then
+              echo "  （空）"
+            else
+              printf '  %s\n' "${all_names[@]}"
+            fi
+            echo "请先用「从上游同步 Chromium 二进制」工作流重新同步该版本"
+            exit 1
+          fi
+
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'ungoogled-chromium-*_linux.tar.xz' \
+            --dir .
+
+          pkgs=(ungoogled-chromium-*_linux.tar.xz)
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "下载后没有落地的 *_linux.tar.xz 文件"
+            exit 1
+          fi
+          ls -lh "${pkgs[@]}"
+
+      - name: 设置 QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ github.token }}
+
+      - name: 生成镜像标签
+        id: tags
+        env:
+          IMAGE_TAG: ${{ steps.prep.outputs.image_tag }}
+          OWNER_LC: ${{ steps.prep.outputs.owner_lc }}
+          IMAGE_NAME: ${{ steps.prep.outputs.image_name }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          # 每个版本只推一个标签：<版本号>-mcp，不推 latest
+          tag="ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
+          echo "tags=${tag}" >> "$GITHUB_OUTPUT"
+          echo "本次将推送：${tag}"
+
+      # 用 shell 重试而不是 docker/build-push-action：拉 ghcr.io 上的基础镜像 blob 时偶发
+      # 429 Too Many Requests，单次失败的构建需要整条流水线重跑。同一次 job 里重试可以复用
+      # 已下载的层（buildkit 容器在 job 内常驻），因此只补拉失败的那部分。
+      # 也正因为依赖层复用，这里不能开 --no-cache，否则每次重试都从头下载。
+      - name: 构建并推送镜像
+        env:
+          TAG: ${{ steps.tags.outputs.tags }}
+          IMAGE_NAME: ${{ steps.prep.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.prep.outputs.image_tag }}
+          BUILDKIT_PROGRESS: plain
+          MAX_ATTEMPTS: '3'
+          RETRY_DELAYS: '30 120'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ -z "${TAG}" ]; then
+            echo "没有可用的镜像标签" >&2
+            exit 1
+          fi
+
+          build() {
+            docker buildx build \
+              --push \
+              --pull \
+              --platform linux/amd64,linux/arm64 \
+              -t "${TAG}" \
+              --label "org.opencontainers.image.title=${IMAGE_NAME}" \
+              --label "org.opencontainers.image.description=ChromiumManager container image" \
+              --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --label "org.opencontainers.image.version=${IMAGE_TAG}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              .
+          }
+
+          read -r -a delays <<< "${RETRY_DELAYS}"
+
+          for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+            echo "::group::构建尝试 ${attempt}/${MAX_ATTEMPTS}"
+            status=0
+            build || status=$?
+            echo "::endgroup::"
+
+            if [ "${status}" -eq 0 ]; then
+              echo "构建并推送成功（第 ${attempt} 次尝试）"
+              exit 0
+            fi
+
+            if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
+              echo "::error::构建连续失败 ${MAX_ATTEMPTS} 次，最后一次退出码 ${status}"
+              exit "${status}"
+            fi
+
+            delay="${delays[$((attempt - 1))]:-60}"
+            echo "第 ${attempt} 次构建失败（退出码 ${status}），${delay} 秒后重试" >&2
+            sleep "${delay}"
+          done
