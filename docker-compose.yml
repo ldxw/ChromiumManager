@@ -45,6 +45,15 @@ services:
       # auto 按容器 seccomp 状态判断；1 强制启用（容器需 seccomp=unconfined）；0 强制关闭。
       # - CHROME_SANDBOX=auto
 
+      # ---------- 其他 ----------
+      # 数据目录，data.db / profiles / screenshots 都在下面，默认 /config/data。
+      # - DATA_DIR=/config/data
+      # 浏览器内界面显示的应用名，默认 ChromiumManager。
+      # - TITLE=ChromiumManager
+      # 去掉窗口边框与标题栏，界面铺满整个桌面。判据是变量是否定义，传空值也生效；
+      # 镜像默认已设为 1，想恢复带标题栏的窗口模式就删掉这个变量。
+      # - NO_DECOR=1
+
     ports:
       # Web 界面（HTTPS）
       - 3001:3001
