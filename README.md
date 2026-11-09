@@ -105,12 +105,16 @@ docker run -d \
 镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp`，上例中的
 `156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
 
-镜像只发布到 GHCR（`ghcr.io/<owner>/chromium-manager`），构建由
-`.github/workflows/docker-image.yml` 完成：
+镜像默认发布到 GHCR（`ghcr.io/<owner>/chromium-manager`），可选同时推一份到阿里云
+镜像仓库，构建由 `.github/workflows/docker-image.yml` 完成：
 
 - 手动触发，可选填 `release_tag`（二进制来源）与 `image_tag`（镜像标签）；
   两者留空时，前者取仓库最新的正式 Release，后者跟随前者。
-- 只推 GHCR，鉴权用仓库自带的 `GITHUB_TOKEN`，不需要额外 secret。
+- GHCR 鉴权用仓库自带的 `GITHUB_TOKEN`，不需要额外 secret。
+- 勾选 `push_aliyun` 后额外推送一份到
+  `<ALIYUN_REGISTRY>/<ALIYUN_NAMESPACE>/chromium-manager:<版本号>-mcp`，
+  需要在仓库 Secrets 里配置 `ALIYUN_REGISTRY`、`ALIYUN_NAMESPACE`、
+  `ALIYUN_USERNAME`、`ALIYUN_PASSWORD`；缺任意一个会在构建前直接失败。
 - 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp` 后缀。
 - 构建失败会自动重试最多 3 次，用于绕过拉取基础镜像时的偶发 429。
 

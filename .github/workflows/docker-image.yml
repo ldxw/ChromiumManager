@@ -1,7 +1,8 @@
 name: 构建并推送 Docker 镜像
 
-# 只做一件事：从 Release 取 Chromium 二进制，构建多架构镜像并推到 GHCR。
-# 镜像地址固定为 ghcr.io/<owner>/chromium-manager:<版本号>-mcp，不推 latest。
+# 只做一件事：从 Release 取 Chromium 二进制，构建多架构镜像并推送。
+# 默认推到 GHCR，ghcr.io/<owner>/chromium-manager:<版本号>-mcp，不推 latest；
+# 可选额外推一份到阿里云镜像仓库。
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +16,11 @@ on:
         required: false
         type: string
         default: ''
+      push_aliyun:
+        description: '同时推送到阿里云镜像仓库（需要配置 ALIYUN_* secrets）'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,6 +45,7 @@ jobs:
         env:
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          INPUT_PUSH_ALIYUN: ${{ inputs.push_aliyun }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
@@ -88,12 +95,36 @@ jobs:
             exit 1
           fi
 
-          echo "镜像标签：${image_tag}-mcp，二进制来源：${release_tag}"
+          push_aliyun="${INPUT_PUSH_ALIYUN}"
+          if [ "${push_aliyun}" != "true" ]; then
+            push_aliyun="false"
+          fi
+
+          echo "镜像标签：${image_tag}-mcp，二进制来源：${release_tag}，推送阿里云：${push_aliyun}"
 
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
           echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
           echo "image_name=${image_name}" >> "$GITHUB_OUTPUT"
+          echo "push_aliyun=${push_aliyun}" >> "$GITHUB_OUTPUT"
+
+      - name: 检查所需密钥
+        if: ${{ steps.prep.outputs.push_aliyun == 'true' }}
+        env:
+          ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          [ -n "${ALIYUN_REGISTRY}" ] || { echo "缺少 secrets.ALIYUN_REGISTRY"; exit 1; }
+          [ -n "${ALIYUN_NAMESPACE}" ] || { echo "缺少 secrets.ALIYUN_NAMESPACE"; exit 1; }
+          [ -n "${ALIYUN_USERNAME}" ] || { echo "缺少 secrets.ALIYUN_USERNAME"; exit 1; }
+          [ -n "${ALIYUN_PASSWORD}" ] || { echo "缺少 secrets.ALIYUN_PASSWORD"; exit 1; }
+
+          echo "阿里云密钥检查通过"
 
       - name: 从 Release 下载 Chromium 二进制
         env:
@@ -161,20 +192,53 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ github.token }}
 
+      - name: 登录阿里云镜像仓库
+        if: ${{ steps.prep.outputs.push_aliyun == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
       - name: 生成镜像标签
         id: tags
         env:
           IMAGE_TAG: ${{ steps.prep.outputs.image_tag }}
           OWNER_LC: ${{ steps.prep.outputs.owner_lc }}
           IMAGE_NAME: ${{ steps.prep.outputs.image_name }}
+          PUSH_ALIYUN: ${{ steps.prep.outputs.push_aliyun }}
+          ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
+          ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
           # 每个版本只推一个标签：<版本号>-mcp，不推 latest
-          tag="ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
-          echo "tags=${tag}" >> "$GITHUB_OUTPUT"
-          echo "本次将推送：${tag}"
+          raw_tags=""
+          add_tag() {
+            [ -n "$1" ] || return 0
+            raw_tags="${raw_tags}$1"$'\n'
+          }
+
+          add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
+
+          if [ "${PUSH_ALIYUN}" = "true" ]; then
+            add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
+          fi
+
+          if [ -z "${raw_tags}" ]; then
+            echo "未生成任何镜像标签" >&2
+            exit 1
+          fi
+
+          {
+            echo "tags<<EOF"
+            printf "%s" "${raw_tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "本次将推送以下标签："
+          printf "%s" "${raw_tags}"
 
       # 用 shell 重试而不是 docker/build-push-action：拉 ghcr.io 上的基础镜像 blob 时偶发
       # 429 Too Many Requests，单次失败的构建需要整条流水线重跑。同一次 job 里重试可以复用
@@ -182,7 +246,7 @@ jobs:
       # 也正因为依赖层复用，这里不能开 --no-cache，否则每次重试都从头下载。
       - name: 构建并推送镜像
         env:
-          TAG: ${{ steps.tags.outputs.tags }}
+          TAGS: ${{ steps.tags.outputs.tags }}
           IMAGE_NAME: ${{ steps.prep.outputs.image_name }}
           IMAGE_TAG: ${{ steps.prep.outputs.image_tag }}
           BUILDKIT_PROGRESS: plain
@@ -192,17 +256,28 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          if [ -z "${TAG}" ]; then
+          tags=()
+          while IFS= read -r tag; do
+            [ -n "${tag}" ] || continue
+            tags+=("${tag}")
+          done <<< "${TAGS}"
+
+          if [ "${#tags[@]}" -eq 0 ]; then
             echo "没有可用的镜像标签" >&2
             exit 1
           fi
+
+          tag_args=()
+          for tag in "${tags[@]}"; do
+            tag_args+=(-t "${tag}")
+          done
 
           build() {
             docker buildx build \
               --push \
               --pull \
               --platform linux/amd64,linux/arm64 \
-              -t "${TAG}" \
+              "${tag_args[@]}" \
               --label "org.opencontainers.image.title=${IMAGE_NAME}" \
               --label "org.opencontainers.image.description=ChromiumManager container image" \
               --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
