@@ -150,10 +150,64 @@ compose 文件时，换成目标宿主机 `id -u` / `id -g` 的实际数字。
 | `TITLE` | `ChromiumManager` | 浏览器内界面的应用名（web app manifest 的 `name` / `short_name`） |
 | `DATA_DIR` | `/config/data` | 数据目录：`data.db`、`profiles/`、`screenshots/` 都在下面。直接跑二进制时默认是当前目录的 `data` |
 | `NO_DECOR` | `1` | `1` 去掉窗口边框与标题栏，界面铺满整个桌面，看起来像一个独立应用。判据是变量**是否定义**，传空值同样生效；改成不设值即可恢复带标题栏的窗口模式 |
+| `SELKIES_MANUAL_WIDTH` | `1920` | 远程桌面的固定宽度，和 `SELKIES_MANUAL_HEIGHT` 一起锁定流分辨率 |
+| `SELKIES_MANUAL_HEIGHT` | `1080` | 远程桌面的固定高度。两个值必须一起改，只设一个时服务端会用 `1024` / `768` 补另一个 |
 
 `PUID` / `PGID` / `TZ` / `LC_ALL` / `CUSTOM_USER` / `PASSWORD` / `TITLE` / `NO_DECOR` 由继承的
 linuxserver 基础镜像处理。MCP 相关变量（`MCP_TOKEN`、`MCP_KEYS` 等）见
 「🤖 MCP 支持 → MCP 环境变量」。
+
+#### 手机端卡在 Waiting for stream...
+
+这是上游 Selkies 前端的缺陷，镜像里做了两处调整，不需要使用者配置。
+
+**主因：解码器配置被浏览器拒绝。** 上游把解码器初始化写死成：
+
+```js
+{codec, codedWidth, codedHeight, optimizeForLatency: true,
+ hardwareAcceleration: "prefer-software"}
+```
+
+真机 WebCodecs 实测（`VideoDecoder.isConfigSupported`）：
+
+| hardwareAcceleration | 1280×720 | 1920×1080 | 2940×4881 |
+| --- | --- | --- | --- |
+| `"prefer-software"`（上游写法） | false | false | false |
+| `"prefer-hardware"` | 视 codec 而定 | 视 codec 而定 | 视 codec 而定 |
+| 不传该字段 | true | true | true |
+
+也就是说带 `prefer-software` 时**任何尺寸都过不了校验**，与分辨率无关。前端默认 encoder 是
+`x264enc`，它和 `x264enc-striped` 都走分片（stripe）解码器路径：`isConfigSupported` 返回
+false 时只 `console.error` 一行 `VNC stripe decoder config not supported for Y=..`、丢掉刚建
+好的解码器，下一帧再重建再失败，屏幕始终没有画面，遮罩停在 `Waiting for stream...`。
+切到 `jpeg` 时才走主解码器，那条路径失败会进 `Fi()`：降 encoder、写 `_crash_count`、3 秒后
+整页 reload。
+
+镜像构建时删掉该字段（`Dockerfile` 里对 `selkies-dashboard/assets/index-*.js` 的 `sed`），
+退回实测可行的「不传」路径。电脑之所以能看，是桌面 Chromium 接受了这个提示。
+
+改的是 `selkies-dashboard/assets/`，不是 nginx 的 root `/usr/share/selkies/web/`：后者在容器
+启动时由 `init-nginx` 用 `rm -Rf` + `cp -a` 从 `$DASHBOARD`（默认 `selkies-dashboard`）重建，
+只改 `web/` 会在启动时被覆盖。
+
+沙箱 A/B 实测（同一台桌面 Chromium，页面里模拟真机行为：带 `hardwareAcceleration` 的配置
+一律返回 `supported:false`；手机 UA、视口 980×1627、DPR 3）：
+
+| 容器 | 解码器配置 | probe 结果 | 遮罩 | 日志 |
+| --- | --- | --- | --- | --- |
+| 未打补丁 | `hardwareAcceleration:"prefer-software"` | false ×2 | 仍在 | `VNC stripe decoder config not supported` |
+| 已打补丁 | 不传该字段 | true ×1 | 隐藏 | `Stream started (UI elements hidden).` |
+
+**次因：窗口尺寸频繁变化触发管道重配置。** 手机地址栏收放、键盘弹出都会改 `innerHeight`，
+前端每次都发 `r,<宽>x<高>`，服务端每次都整条管道重建；如果某次 `STOP_VIDEO` 之后到来的
+尺寸恰好没变，服务端会判定为重复请求直接丢弃（`selkies.py:2384`），采集不再重启。
+
+设了 `SELKIES_MANUAL_*` 之后服务端进入 manual 模式：前端照旧发 `r,`，但 `selkies.py:3369`
+会直接忽略（日志 `Client attempted to resize ... Request ignored.`），管道不再被重建；
+顺带把手机竖屏的千万像素编码量降到 1920×1080。
+
+两种改法都不需要使用者操作。若手机上仍觉得字小，可以把 `SELKIES_MANUAL_*` 一起调高
+（如 `2560`×`1440`），前提是目标手机的解码器能吃下。
 
 #### PUID / PGID 只能设一次
 

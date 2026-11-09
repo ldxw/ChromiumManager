@@ -55,6 +55,12 @@ ENV CHROME_SANDBOX=auto
 # /etc/xdg/openbox/rc.xml 的通配规则写入 <decor>no</decor>），界面看起来就是一个
 # 独立应用而不是桌面里的小窗口。注意基础镜像判据是「变量已定义」，传空值也生效。
 ENV NO_DECOR=1
+# 远程桌面的固定分辨率。不设时按「客户端 CSS 尺寸 × devicePixelRatio」算流分辨率，手机
+# DPR 常为 3~4，竖屏可达 2940x4881（约 1400 万像素）：客户端解不动、带宽白涨，而且窗口
+# 尺寸一变就整条管道重配置。锁定后尺寸与设备无关，客户端只做等比缩放。
+# 两个值要一起改，只设一个时另一个会被补成 1024/768。
+ENV SELKIES_MANUAL_WIDTH=1920
+ENV SELKIES_MANUAL_HEIGHT=1080
 
 RUN \
   echo "**** install packages ****" && \
@@ -97,6 +103,25 @@ RUN printf '%s\n' \
   rm -f /tmp/mcp-location.conf && \
   test "$(grep -c 'location /mcp' /defaults/default.conf)" -eq 2 && \
   test "$(grep -c 'auth_basic off;' /defaults/default.conf)" -eq 2
+
+# 修补基础镜像里打包的 Selkies 前端 bundle（文件名带内容哈希，随上游版本变化）。
+#
+# 上游把解码器配置写死成 hardwareAcceleration:"prefer-software"。真机 WebCodecs 实测：
+# 带这个提示时所有配置（含 1280x720）一律 supported:false，不传该字段则全部 true。
+# 默认 encoder 是 x264enc，走分片（stripe）解码器：isConfigSupported 失败时只打一行
+# "VNC stripe decoder config not supported" 并丢掉解码器，下一帧重建再失败，屏幕始终没有
+# 画面，遮罩停在 "Waiting for stream..."。（jpeg 走主解码器，失败会进 Fi() 降档并 3 秒
+# reload。）因此把该字段整条删掉，退回实测可行的「不传」路径。sed 后用计数校验，上游改写法
+# 或改名时构建直接失败，而不是悄悄产出一个坏镜像。
+#
+# 改的必须是 selkies-dashboard：nginx 的 root 是 /usr/share/selkies/web，但该目录在容器
+# 启动时由 init-nginx 用 `rm -Rf web && cp -a $DASHBOARD web` 重建（DASHBOARD 默认
+# selkies-dashboard），所以只有改源目录才能带进最终产物；改 web 会在启动时被覆盖掉。
+RUN f="$(ls /usr/share/selkies/selkies-dashboard/assets/index-*.js)" && \
+  test "$(printf '%s\n' "$f" | wc -l)" -eq 1 && \
+  test "$(grep -o ',hardwareAcceleration:"prefer-software"' "$f" | wc -l)" -eq 2 && \
+  sed -i 's/,hardwareAcceleration:"prefer-software"//g' "$f" && \
+  test "$(grep -o 'prefer-software' "$f" | wc -l)" -eq 0
 
 COPY /root /
 
