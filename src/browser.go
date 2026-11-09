@@ -148,9 +148,44 @@ func getProxyInfo(proxyRawID int64) proxyInfo {
 	return info
 }
 
-// enrichFingerprint fills in Seed on new profiles.
+// defaultFingerprint returns the same defaults the Web UI uses for a new
+// profile, so profiles created through the API or by MCP_KEYS auto-creation
+// start with a usable hardware/host fingerprint instead of the container's
+// real values.
+func defaultFingerprint() FingerprintConfig {
+	return FingerprintConfig{
+		Platform:            "windows",
+		Brand:               "Chrome",
+		HardwareConcurrency: "8",
+		DeviceMemory:        "8",
+		Screen:              "1920x1080",
+		DisableFeatures:     []string{"webrtc"},
+		DisableFingerprint:  []string{},
+		RandomFingerprint:   true,
+		ProxyLang:           true,
+		ProxyTimezone:       true,
+		ProxyLocation:       true,
+	}
+}
+
+// isEmptyFingerprint reports whether nothing at all was configured, which is
+// what callers that omit the fingerprint field end up with.
+func isEmptyFingerprint(f FingerprintConfig) bool {
+	return f.Seed == 0 &&
+		f.Platform == "" && f.Brand == "" &&
+		f.HardwareConcurrency == "" && f.DeviceMemory == "" &&
+		f.Screen == "" && f.Lang == "" && f.Timezone == "" &&
+		f.IP == "" && f.Location == "" &&
+		len(f.DisableFeatures) == 0 && len(f.DisableFingerprint) == 0 &&
+		!f.RandomFingerprint && !f.ProxyLang && !f.ProxyTimezone && !f.ProxyLocation
+}
+
+// enrichFingerprint fills in defaults and a random Seed on new profiles.
 func enrichFingerprint(p *Profile, isNew bool) {
 	if isNew {
+		if isEmptyFingerprint(p.Fingerprint) {
+			p.Fingerprint = defaultFingerprint()
+		}
 		p.Fingerprint.Seed = rand.Int32()
 	}
 }

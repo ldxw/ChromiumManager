@@ -212,19 +212,24 @@
           <el-col :xs="24" :sm="12">
             <el-form-item label="操作系统">
               <el-select v-model="model.form.fp.platform" clearable placeholder="请选择操作系统">
-                <el-option label="Windows" value="windows"></el-option>
-                <el-option label="Linux" value="linux"></el-option>
-                <el-option label="macOS" value="macos"></el-option>
+                <el-option
+                  v-for="item in platformOptions"
+                  :key="item.value"
+                  :label="withDefaultMarkLabel(item.label, item.value, DEFAULT_PLATFORM)"
+                  :value="item.value"
+                ></el-option>
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="12">
             <el-form-item label="浏览器品牌">
               <el-select v-model="model.form.fp.brand" clearable placeholder="请选择浏览器品牌">
-                <el-option label="Chrome" value="Chrome"></el-option>
-                <el-option label="Edge" value="Edge"></el-option>
-                <el-option label="Opera" value="Opera"></el-option>
-                <el-option label="Vivaldi" value="Vivaldi"></el-option>
+                <el-option
+                  v-for="b in brandOptions"
+                  :key="b"
+                  :label="withDefaultMark(b, DEFAULT_BRAND)"
+                  :value="b"
+                ></el-option>
               </el-select>
             </el-form-item>
           </el-col>
@@ -233,21 +238,33 @@
         <el-row :gutter="20">
           <el-col :xs="24" :sm="12">
             <el-form-item label="设备核心">
+              <template #label>
+                <span class="label-with-help">
+                  设备核心
+                  <el-tooltip placement="top" effect="dark" :show-after="200">
+                    <template #content>
+                      <div class="help-tip">
+                        <p v-for="tip in coreTips" :key="tip.k" class="tip-line">
+                          <span class="tip-k">{{ tip.k }}</span>
+                          <span class="tip-t">{{ tip.t }}</span>
+                        </p>
+                      </div>
+                    </template>
+                    <el-icon class="help-icon"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </span>
+              </template>
               <el-select
                 v-model="model.form.fp.hardwareConcurrency"
                 placeholder="请选择设备核心"
                 clearable
               >
-                <el-option label="2" value="2"></el-option>
-                <el-option label="4" value="4"></el-option>
-                <el-option label="6" value="6"></el-option>
-                <el-option label="8" value="8"></el-option>
-                <el-option label="10" value="10"></el-option>
-                <el-option label="12" value="12"></el-option>
-                <el-option label="16" value="16"></el-option>
-                <el-option label="20" value="20"></el-option>
-                <el-option label="24" value="24"></el-option>
-                <el-option label="32" value="32"></el-option>
+                <el-option
+                  v-for="c in coreOptions"
+                  :key="c"
+                  :label="withDefaultMark(c, DEFAULT_HARDWARE_CONCURRENCY)"
+                  :value="c"
+                ></el-option>
               </el-select>
             </el-form-item>
           </el-col>
@@ -258,9 +275,12 @@
                 placeholder="请选择设备内存"
                 clearable
               >
-                <el-option label="2" value="2"></el-option>
-                <el-option label="4" value="4"></el-option>
-                <el-option label="8" value="8"></el-option>
+                <el-option
+                  v-for="m in memoryOptions"
+                  :key="m"
+                  :label="withDefaultMark(m, DEFAULT_DEVICE_MEMORY)"
+                  :value="m"
+                ></el-option>
               </el-select>
             </el-form-item>
           </el-col>
@@ -270,7 +290,12 @@
           <el-col :xs="24" :sm="12">
             <el-form-item label="屏幕尺寸">
               <el-select v-model="model.form.fp.screen" clearable placeholder="请选择屏幕尺寸">
-                <el-option v-for="s in screens" :key="s" :label="s" :value="s"></el-option>
+                <el-option
+                  v-for="s in screens"
+                  :key="s"
+                  :label="withDefaultMark(s, DEFAULT_SCREEN)"
+                  :value="s"
+                ></el-option>
               </el-select>
             </el-form-item>
           </el-col>
@@ -401,7 +426,14 @@ import {
   toRef,
   watch
 } from 'vue'
-import { Location, ArrowDown, CircleClose, Upload, Download } from '@element-plus/icons-vue'
+import {
+  Location,
+  ArrowDown,
+  CircleClose,
+  Upload,
+  Download,
+  QuestionFilled
+} from '@element-plus/icons-vue'
 import { viewMapLocation, openMapPicker } from '@/utils/mapPicker'
 
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -419,7 +451,23 @@ import {
   importCookies
 } from '@/api'
 import { validateForm } from '@/utils/common'
-import { languages, timezones, screens, BASE_URL } from '@/utils/constants'
+import {
+  languages,
+  timezones,
+  screens,
+  platformOptions,
+  brandOptions,
+  coreOptions,
+  memoryOptions,
+  DEFAULT_PLATFORM,
+  DEFAULT_BRAND,
+  DEFAULT_HARDWARE_CONCURRENCY,
+  DEFAULT_DEVICE_MEMORY,
+  DEFAULT_SCREEN,
+  withDefaultMark,
+  withDefaultMarkLabel,
+  BASE_URL
+} from '@/utils/constants'
 import { useBreakpoint } from '@/utils/useBreakpoint'
 import ProxyManagement from './ProxyManagement.vue'
 
@@ -584,13 +632,28 @@ const onRefreshClick = () => {
   search()
 }
 
+// 设备核心说明，渲染在表单标签的问号 tooltip 里。
+const coreTips = [
+  {
+    k: '是什么',
+    t: '：对应 navigator.hardwareConcurrency，即浏览器报告的逻辑 CPU 核心数，网站常拿它配合内存、显卡估算设备档次。'
+  },
+  { k: '默认 8', t: '：覆盖人群最广的取值。' },
+  {
+    k: '建议搭配',
+    t: '：8 核 + 8GB 内存（主流桌面）、4 核 + 4GB（中低端本）、12/16 核 + 8GB（高性能本）。'
+  },
+  { k: '不要用', t: '：32 核配 2GB 内存这类现实中不存在的组合，组合本身就是特征。' },
+  { k: '留空的后果', t: '：不传该参数，浏览器会暴露容器的真实核心数（小 VPS 上通常是 2）。' }
+]
+
 const defaultFp = () => ({
-  platform: '',
-  brand: '',
-  hardwareConcurrency: '',
-  deviceMemory: '',
+  platform: DEFAULT_PLATFORM,
+  brand: DEFAULT_BRAND,
+  hardwareConcurrency: DEFAULT_HARDWARE_CONCURRENCY,
+  deviceMemory: DEFAULT_DEVICE_MEMORY,
   disableFeatures: ['webrtc'],
-  screen: '',
+  screen: DEFAULT_SCREEN,
   lang: '',
   timezone: '',
   location: '',
@@ -600,6 +663,19 @@ const defaultFp = () => ({
   proxyTimezone: true,
   proxyLocation: true
 })
+
+// fpWithDefaults 以默认指纹为底，只覆盖来源里非空的值。
+// 空字符串与 null 视为未设置，保留默认（例如参照已有配置新建时补上硬件参数）。
+const fpWithDefaults = (src) => {
+  const fp = defaultFp()
+  if (src && typeof src === 'object') {
+    for (const [k, v] of Object.entries(src)) {
+      if (v === '' || v === null || v === undefined) continue
+      fp[k] = Array.isArray(v) ? [...v] : v
+    }
+  }
+  return fp
+}
 
 const buildPayload = () => {
   const { fp, ...rest } = model.form
@@ -619,9 +695,7 @@ const onItemClick = (row) => {
 
 const onAddClick = () => {
   if (selectedRow.value) {
-    const fpObj = selectedRow.value.fingerprint
-      ? JSON.parse(JSON.stringify(selectedRow.value.fingerprint))
-      : defaultFp()
+    const fpObj = fpWithDefaults(selectedRow.value.fingerprint)
     model.form = {
       name: '',
       groupId: selectedRow.value.groupId || activeGroupId.value,
@@ -845,6 +919,32 @@ defineExpose({
 .delete-item {
   color: #f56c6c !important;
 }
+
+// tooltip 内容挂在 body 上，scoped 样式作用不到，所以放在全局块。
+.help-tip {
+  max-width: 320px;
+  line-height: 1.6;
+  font-size: 12px;
+
+  p {
+    margin: 0 0 6px;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  // flex 布局会丢弃子元素之间的空白节点，避免 prettier 换行后
+  // 在「是什么」和「：对应…」之间多出一个空格。
+  .tip-line {
+    display: flex;
+  }
+
+  .tip-k {
+    flex-shrink: 0;
+    font-weight: 600;
+  }
+}
 </style>
 
 <style lang="scss" scoped>
@@ -922,6 +1022,22 @@ defineExpose({
   .switches-row :deep(.el-col) {
     flex: 1 1 45%;
     min-width: 0;
+  }
+}
+
+.label-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  .help-icon {
+    color: var(--el-text-color-secondary);
+    cursor: help;
+    font-size: 14px;
+
+    &:hover {
+      color: var(--el-color-primary);
+    }
   }
 }
 </style>

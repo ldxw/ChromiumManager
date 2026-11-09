@@ -139,6 +139,33 @@ export const languages = [
 
 export const timezones = Intl.supportedValuesOf('timeZone')
 
+// 指纹默认值：新建配置、以及经 API / MCP 创建的配置都用这一组。
+export const DEFAULT_PLATFORM = 'windows'
+export const DEFAULT_BRAND = 'Chrome'
+export const DEFAULT_HARDWARE_CONCURRENCY = '8'
+export const DEFAULT_DEVICE_MEMORY = '8'
+export const DEFAULT_SCREEN = '1920x1080'
+
+// 操作系统 / 浏览器品牌的可选值。操作系统的 label 与 value 不同名。
+export const platformOptions = [
+  { label: 'Windows', value: 'windows' },
+  { label: 'Linux', value: 'linux' },
+  { label: 'macOS', value: 'macos' }
+]
+export const brandOptions = ['Chrome', 'Edge', 'Opera', 'Vivaldi']
+
+// 设备核心 / 设备内存的可选值。deviceMemory 按规范上限为 8。
+export const coreOptions = ['2', '4', '6', '8', '10', '12', '16', '20', '24', '32']
+export const memoryOptions = ['2', '4', '8']
+
+// 给默认选项加标记，避免用户不知道哪个值是默认。
+export const withDefaultMark = (value, defaultValue) =>
+  value === defaultValue ? `${value}（默认）` : value
+
+// label 与 value 不同名时用这个，按 value 判断是否加标记。
+export const withDefaultMarkLabel = (label, value, defaultValue) =>
+  value === defaultValue ? `${label}（默认）` : label
+
 export const screens = [
   '1280x720',
   '1280x800',
