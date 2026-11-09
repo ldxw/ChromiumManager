@@ -228,10 +228,19 @@ Docker Hub，构建由 `.github/workflows/docker-image.yml` 完成：
 - 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp` 后缀。
 - 构建失败会自动重试最多 3 次，用于绕过拉取基础镜像时的偶发 429。
 - GHCR 与 Docker Hub 保留 buildx 默认的 provenance attestation。勾选 `push_aliyun` 时，
-  阿里云那份会**单独再推一次**并关闭 provenance 与 SBOM，因为阿里云 ACR 不认
-  `application/vnd.oci.empty.v1+json` 这个 attestation manifest 类型，会拒绝整次推送。
+  阿里云那份会**单独再推一次**，关闭 provenance 与 SBOM，并固定输出 Docker schema2
+  （`--output type=image,oci-mediatypes=false`）：
+  - 阿里云 ACR 不认 `application/vnd.oci.empty.v1+json` 这个 attestation manifest 类型，
+    会拒绝整次推送；
+  - 关掉 attestation 后 buildx 仍可能输出 OCI image index，而 ACR 按 Docker v2 仓库使用，
+    收下后控制台与拉取都解析不出内容（表现为镜像“空的”）。固定 schema2 后不再受
+    runner 上 buildkit 版本的影响。
   两次推送复用同一个 buildkit 层缓存，第二次只重新组 manifest 并上传，不重复编译。
   阿里云那份的 manifest list 因此只有 amd64 / arm64 两条真实镜像，无 attestation。
+- 每组推送成功后都会**回读校验**（`.github/scripts/verify-image.py`）：确认 tag 指向多架构
+  索引、平台恰为 `linux/amd64` / `linux/arm64`，并逐个确认子 manifest 引用的 config 与
+  全部 layer blob 在仓库里真的存在。registry 只校验 manifest 本身，不校验它引用的 blob，
+  所以 buildx 报成功不等于镜像可用；校验不过按该组失败处理，CI 会直接红掉。
 
 ### 通过以下网址访问应用
 
