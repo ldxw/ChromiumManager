@@ -70,8 +70,11 @@ services:
       # MCP 相关，按需开启，详见「🤖 MCP 支持」
       - MCP_ENABLE_DESTRUCTIVE=0
       # - MCP_TOKEN=换成你自己的随机串
+      # - MCP_HTTP_ADDR=0.0.0.0:10102
     ports:
       - 3001:3001
+      # 外部 MCP 直连端口，AI 客户端用 http://<宿主机>:10102/mcp
+      - 10102:10102
     volumes:
       - ./config:/config
     restart: unless-stopped
@@ -93,6 +96,7 @@ docker run -d \
   -e LC_ALL=zh_CN.UTF-8 \
   -e MCP_ENABLE_DESTRUCTIVE=0 \
   -p 3001:3001 \
+  -p 10102:10102 \
   -v ./config:/config \
   --restart unless-stopped \
   ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
@@ -100,6 +104,15 @@ docker run -d \
 
 镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp`，上例中的
 `156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
+
+镜像只发布到 GHCR（`ghcr.io/<owner>/chromium-manager`），构建由
+`.github/workflows/docker-image.yml` 完成：
+
+- 手动触发，可选填 `release_tag`（二进制来源）与 `image_tag`（镜像标签）；
+  两者留空时，前者取仓库最新的正式 Release，后者跟随前者。
+- 只推 GHCR，鉴权用仓库自带的 `GITHUB_TOKEN`，不需要额外 secret。
+- 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp` 后缀。
+- 构建失败会自动重试最多 3 次，用于绕过拉取基础镜像时的偶发 429。
 
 ### 通过以下网址访问应用
 
@@ -140,7 +153,8 @@ docker run -d \
 | 方式 | 入口 | 说明 |
 | --- | --- | --- |
 | stdio | `ChromiumManager --mcp-stdio` | 由客户端拉起子进程，stdout 是协议通道，日志走 stderr |
-| Streamable HTTP | `POST http://127.0.0.1:10101/mcp` | 随主程序一起启动，客户端连接已在运行的服务 |
+| Streamable HTTP（内部） | `POST http://127.0.0.1:10101/mcp` | 容器内回环，供 nginx 反代和浏览器内界面使用 |
+| Streamable HTTP（外部） | `POST http://0.0.0.0:10102/mcp` | 独立监听，容器外 AI 客户端可直连，不经 nginx |
 
 HTTP 传输在容器内只监听 `127.0.0.1:10101`，镜像里的 nginx 已在两个 server 块（容器内
 3000 = HTTP、3001 = HTTPS）各加了一条 `location /mcp` 反代到该端口，所以**容器外可以直接
@@ -164,6 +178,23 @@ curl -k -X POST https://<宿主机>:3001/mcp -H 'Content-Type: application/json'
 
 因为端点现在可以从容器外触达，**强烈建议设置 `MCP_TOKEN`**；不设置时任何能连到该端口的人
 都能调用全部已启用的工具。
+
+### 外部直连端口
+
+除 nginx 反代之外，程序还会另起一个独立的 MCP 监听，默认 `0.0.0.0:10102`，只挂 `/mcp`
+和 `/healthz` 两个路由，不暴露管理界面，也不经过 Basic Auth：
+
+```bash
+docker run ... -p 10102:10102 ...
+
+curl -X POST http://<宿主机>:10102/mcp -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <你的 MCP_TOKEN>' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+curl http://<宿主机>:10102/healthz   # 返回 ok，可用于探活
+```
+
+地址由 `MCP_HTTP_ADDR` 控制：改成 `127.0.0.1:10102` 可退回仅本机，设为 `off` 完全关闭。
+鉴权同样读 `MCP_TOKEN`，为空时不校验。
 
 ### 客户端配置
 
@@ -200,13 +231,15 @@ Streamable HTTP（先正常运行程序）：
 | --- | --- |
 | `DATA_DIR` | 数据目录，默认为 `./data` |
 | `MCP_ENABLE_DESTRUCTIVE` | 设为 `1` 才注册删除类工具（`delete_profile` / `delete_proxy` / `delete_group` / `stop_all_profiles`） |
-| `MCP_TOKEN` | 仅 HTTP 传输生效；设置后要求 `Authorization: Bearer <token>`，未设置不校验。经 nginx 反代后端点可从容器外触达，建议始终设置 |
+| `MCP_TOKEN` | 仅 HTTP 传输生效；设置后要求 `Authorization: Bearer <token>`，未设置不校验。反代与外部端口都在容器外可触达，建议始终设置 |
+| `MCP_HTTP_ADDR` | 外部直连监听地址，默认 `0.0.0.0:10102`；设为 `127.0.0.1:10102` 仅本机可用，设为 `off` 关闭 |
 
 需要 HTTP 传输鉴权时，在 `docker run` 里再加 `-e MCP_TOKEN=<随机串>`（compose 中放开被注释的那行），
 客户端请求必须带 `Authorization: Bearer <随机串>`，否则返回 401。
 
-镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空），`docker run -e` 或 compose 的
-`environment` 会覆盖它们。两个变量在进程启动时读取一次，改了要重启容器才生效。
+镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空）、`MCP_HTTP_ADDR=0.0.0.0:10102`，
+`docker run -e` 或 compose 的 `environment` 会覆盖它们。三个变量都在进程启动时读取一次，
+改了要重启容器才生效。
 
 ### 工具列表
 

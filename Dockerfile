@@ -46,6 +46,8 @@ ENV DATA_DIR=/config/data
 # 默认不注册删除类 MCP 工具；MCP_TOKEN 留空时 HTTP 传输不校验
 ENV MCP_ENABLE_DESTRUCTIVE=0
 ENV MCP_TOKEN=
+# 外部 MCP 监听地址，容器外可直接连；设为 off 关闭
+ENV MCP_HTTP_ADDR=0.0.0.0:10102
 
 RUN \
   echo "**** install packages ****" && \
@@ -92,5 +94,7 @@ RUN printf '%s\n' \
 COPY /root /
 
 EXPOSE 3000
+# 外部 MCP 直连端口（MCP_HTTP_ADDR 默认 0.0.0.0:10102）
+EXPOSE 10102
 
 VOLUME /config
