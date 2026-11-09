@@ -105,22 +105,28 @@ docker run -d \
 镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp`，上例中的
 `156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
 
-镜像默认发布到 GHCR（`ghcr.io/<owner>/chromium-manager`），可选同时推一份到阿里云
-镜像仓库或 Docker Hub，构建由 `.github/workflows/docker-image.yml` 完成：
+镜像默认发布到 GHCR（`ghcr.io/<owner>/chromium-manager`），也可以推阿里云镜像仓库或
+Docker Hub，构建由 `.github/workflows/docker-image.yml` 完成：
 
 - 手动触发，可选填 `release_tag`（二进制来源）与 `image_tag`（镜像标签）；
   两者留空时，前者取仓库最新的正式 Release，后者跟随前者。
-- GHCR 鉴权用仓库自带的 `GITHUB_TOKEN`，不需要额外 secret。
-- 勾选 `push_aliyun` 后额外推送一份到
+- `push_ghcr` **默认勾选**，取消后本次完全不碰 GHCR，可以只推阿里云或 Docker Hub。
+  GHCR 鉴权用仓库自带的 `GITHUB_TOKEN`，不需要额外 secret。
+- 勾选 `push_aliyun` 后推送一份到
   `<ALIYUN_REGISTRY>/<ALIYUN_NAMESPACE>/chromium-manager:<版本号>-mcp`，
   需要在仓库 Secrets 里配置 `ALIYUN_REGISTRY`、`ALIYUN_NAMESPACE`、
   `ALIYUN_USERNAME`、`ALIYUN_PASSWORD`；缺任意一个会在构建前直接失败。
-- 勾选 `push_dockerhub` 后额外推送一份到
+- 勾选 `push_dockerhub` 后推送一份到
   `<DOCKERHUB_USERNAME>/chromium-manager:<版本号>-mcp`，需要在仓库 Secrets 里配置
   `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`；缺任意一个会在构建前直接失败。
-- 两个开关可以同时勾选，三个仓库共用同一次多架构构建结果。
+- 三个开关可以任意组合，至少勾选一个；全不勾选会在解析参数阶段直接失败。
 - 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp` 后缀。
 - 构建失败会自动重试最多 3 次，用于绕过拉取基础镜像时的偶发 429。
+- GHCR 与 Docker Hub 保留 buildx 默认的 provenance attestation。勾选 `push_aliyun` 时，
+  阿里云那份会**单独再推一次**并关闭 provenance 与 SBOM，因为阿里云 ACR 不认
+  `application/vnd.oci.empty.v1+json` 这个 attestation manifest 类型，会拒绝整次推送。
+  两次推送复用同一个 buildkit 层缓存，第二次只重新组 manifest 并上传，不重复编译。
+  阿里云那份的 manifest list 因此只有 amd64 / arm64 两条真实镜像，无 attestation。
 
 ### 通过以下网址访问应用
 
