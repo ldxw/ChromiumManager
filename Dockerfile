@@ -46,11 +46,12 @@ ENV DATA_DIR=/config/data
 # 默认不注册删除类 MCP 工具；MCP_TOKEN 留空时 HTTP 传输不校验
 ENV MCP_ENABLE_DESTRUCTIVE=0
 ENV MCP_TOKEN=
-# 多 key 绑定，形如 {"key1":"窗口1","key2":"窗口2"}；设置后每个 key 只能操作自己那个配置。
-# 也可以用 MCP_KEYS_FILE 指向一个 JSON 文件（MCP_KEYS 优先）。
+# 多 key 绑定，形如 {"key1":"窗口1","key2":"项目A/窗口1"}；设置后每个 key 只能操作自己那个配置。
+# value 写「配置名」落到 MCP_GROUP_NAME，写「分组名/配置名」则落到该分组，两种写法可混用；
+# 配置名不能含 /。也可以用 MCP_KEYS_FILE 指向一个 JSON 文件（MCP_KEYS 优先）。
 ENV MCP_KEYS=
 ENV MCP_KEYS_FILE=
-# 自动创建配置时使用的分组名
+# 省写分组时用的默认分组名；value 里带「分组名/」的条目不使用它
 ENV MCP_GROUP_NAME=mcp
 # 外部 MCP 监听地址，容器外可直接连；设为 off 关闭
 ENV MCP_HTTP_ADDR=0.0.0.0:10102

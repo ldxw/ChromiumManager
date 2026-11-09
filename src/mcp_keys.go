@@ -28,7 +28,7 @@ import (
 const (
 	defaultMCPGroupName = "mcp"
 
-	errBindingStale = "绑定的配置已不存在或被重命名，请重启容器以按 MCP_KEYS 重新创建"
+	errBindingStale = "绑定的配置已不存在、被重命名或被挪到别的分组，请重启容器以按 MCP_KEYS 重新创建"
 )
 
 type mcpBinding struct {

@@ -127,7 +127,7 @@ func (s *mcpServer) dispatch(ctx context.Context, method string, params json.Raw
 			"launch_profile / stop_profile 控制实例，navigate / read_page 操作页面。"
 		if binding != nil {
 			instructions = fmt.Sprintf("ChromiumManager 指纹浏览器管理。当前 key 已绑定到配置「%s」，"+
-				"工具里的 id 可以省略，省略即操作该配置；不能操作其他配置。", binding.name)
+				"工具里的 id 可以省略，省略即操作该配置；不能操作其他配置。", binding.String())
 		}
 		return map[string]any{
 			"protocolVersion": mcpProtocolVersion,
