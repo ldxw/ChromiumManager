@@ -77,7 +77,7 @@ services:
       # MCP 相关，按需开启，详见「🤖 MCP 支持」
       - MCP_ENABLE_DESTRUCTIVE=0
       # - MCP_TOKEN=换成你自己的随机串
-      # - MCP_KEYS={"key1":"窗口1","key2":"窗口2"}
+      # - MCP_KEYS={"key1":"窗口1","key2":"项目A/窗口1"}
       # - MCP_KEYS_FILE=/config/mcp-keys.json
       # - MCP_GROUP_NAME=mcp
       # - MCP_HTTP_ADDR=0.0.0.0:10102
@@ -354,9 +354,9 @@ Streamable HTTP（先正常运行程序）：
 | --- | --- | --- |
 | `MCP_ENABLE_DESTRUCTIVE` | `0` | 设为 `1` 才注册删除类工具（`delete_profile` / `delete_proxy` / `delete_group` / `stop_all_profiles`） |
 | `MCP_TOKEN` | 空 | 仅 HTTP 传输生效；设置后要求 `Authorization: Bearer <token>`，未设置不校验。反代与外部端口都在容器外可触达，建议始终设置 |
-| `MCP_KEYS` | 空 | 多 key 绑定，JSON 对象，见「多 key 绑定」。设置后优先于 `MCP_TOKEN` |
+| `MCP_KEYS` | 空 | 多 key 绑定，JSON 对象，value 写 `配置名` 或 `分组名/配置名`，见「多 key 绑定」。设置后优先于 `MCP_TOKEN` |
 | `MCP_KEYS_FILE` | 空 | 从文件读取上面那份 JSON；与 `MCP_KEYS` 同时设置时以 `MCP_KEYS` 为准 |
-| `MCP_GROUP_NAME` | `mcp` | 自动创建配置时用的分组名 |
+| `MCP_GROUP_NAME` | `mcp` | 省写分组时用的默认分组名；value 里带 `分组名/` 的条目不受它影响 |
 | `MCP_HTTP_ADDR` | `0.0.0.0:10102` | 外部直连监听地址；设为 `127.0.0.1:10102` 仅本机可用，设为 `off` 关闭。空值按默认处理，`0` / `false` 与 `off` 等价 |
 | `CHROME_SANDBOX` | `auto` | 控制 Chromium 沙箱，见下方说明 |
 
@@ -376,6 +376,24 @@ docker run -d --name chromium-manager \
   ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
 ```
 
+上面的 value 只有配置名，会落到 `MCP_GROUP_NAME`（默认 `mcp`）这一个分组里。要让不同的使用方
+各自拥有独立分组，value 写成 `分组名/配置名`：
+
+```bash
+-e MCP_KEYS='{"key1":"项目A/窗口1","key2":"项目A/窗口2","key3":"项目B/窗口1"}'
+```
+
+这样 `key1` / `key2` 的两个配置在「项目A」下，`key3` 的在「项目B」下，三个 key 互相看不到。
+两种写法可以混用，不带 `/` 的仍然落到默认分组：
+
+```bash
+-e MCP_GROUP_NAME=默认组 \
+-e MCP_KEYS='{"key1":"窗口1","key2":"项目A/窗口1","key3":"项目B/窗口1"}'
+# → 默认组/窗口1、项目A/窗口1、项目B/窗口1
+```
+
+`/` 只认第一个作分隔符，配置名本身不能含 `/`；分组名与配置名两端的空白会被去掉。
+
 也可以用文件，适合 value 里含特殊字符或 key 较多的情况（`MCP_KEYS` 与 `MCP_KEYS_FILE` 同时设置时
 前者优先）：
 
@@ -384,13 +402,13 @@ docker run -d --name chromium-manager \
 ```
 
 ```json
-{"key1": "窗口1", "key2": "窗口2"}
+{"key1": "窗口1", "key2": "项目A/窗口1"}
 ```
 
-JSON 的 value 就是配置名。启动时程序会：
+启动时程序会：
 
-1. 取 `MCP_GROUP_NAME`（默认 `mcp`），按名字取分组，没有就建；
-2. 在该分组下按 value 找配置，没有就建一个（自动分配随机指纹种子），**只创建不启动**；
+1. 按需创建 value 里出现的每个分组（`MCP_GROUP_NAME` 只在省写分组时才会用到），已经存在的直接复用；
+2. 在各分组下按配置名找配置，没有就建一个（自动分配随机指纹种子），**只创建不启动**；
 3. 建立 key → 配置 的内存映射，日志里只打印 key 前 4 位。
 
 客户端照常 `Authorization: Bearer key1` 即可。绑定生效后：
@@ -398,7 +416,7 @@ JSON 的 value 就是配置名。启动时程序会：
 | 行为 | 说明 |
 | --- | --- |
 | `id` 可省略 | `get_profile` / `launch_profile` / `stop_profile` / 6 个浏览器工具缺省即操作绑定配置 |
-| 传别人的 `id` | 直接拒绝：`当前 key 已绑定到配置「窗口1」，不能操作其他配置` |
+| 传别人的 `id` | 直接拒绝：`当前 key 已绑定到配置「项目A/窗口1」，不能操作其他配置` |
 | `list_profiles` / `list_running` / `list_groups` | 只返回自己那条（`list_running` 不含别人的 pid 与 DevTools 地址） |
 | `list_proxies` | 不返回 `url`（里面带账号密码），只给 ip / 语言 / 时区 / 位置 |
 | `add_profile` / `update_profile` / 删除类工具 | 不注册，`tools/list` 看不到，调用返回 unknown tool |
@@ -408,12 +426,13 @@ JSON 的 value 就是配置名。启动时程序会：
 `file://` 之所以必须堵掉：容器里 `/config/data/data.db` 是整份 SQLite 库，`file://` 加 `read_page`
 就能把所有配置的 cookie 与代理凭据读出来。
 
-绑定配置如果在 Web 界面里被改名或删除，该 key 的请求会返回
+绑定配置如果在 Web 界面里被改名、删除，或者被挪到别的分组，该 key 的请求会返回
 `绑定的配置已不存在或被重命名，请重启容器以按 MCP_KEYS 重新创建`，不会自动重建——
 自动重建会让外部使用方悄悄换到一个新环境。重启容器后启动逻辑会重新按名称校正。
 
-两个 key 绑同一个配置名、key 或配置名为空，都会在启动时打印具体原因并让进程退出，不带着半套
-绑定对外服务。stdin 传输（`--mcp-stdio`）不读 `MCP_KEYS`，行为与以前一样。
+两个 key 绑定同一个「分组 + 配置」、key 为空、分组名或配置名为空、配置名里出现第二个 `/`，
+都会在启动时打印具体原因并让进程退出，不带着半套绑定对外服务。stdin 传输（`--mcp-stdio`）
+不读 `MCP_KEYS`，行为与以前一样。
 
 #### Chromium 沙箱
 
