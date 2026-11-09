@@ -57,6 +57,10 @@ ENV MCP_HTTP_ADDR=0.0.0.0:10102
 # Chromium 沙箱：auto 按容器 seccomp 状态判断，1 强制启用，0 强制关闭。
 # 真正启用还需要 --security-opt seccomp=unconfined，见 README。
 ENV CHROME_SANDBOX=auto
+# 关掉 openbox 的窗口边框与标题栏（基础镜像 init-selkies-config 会据此往
+# /etc/xdg/openbox/rc.xml 的通配规则写入 <decor>no</decor>），界面看起来就是一个
+# 独立应用而不是桌面里的小窗口。注意基础镜像判据是「变量已定义」，传空值也生效。
+ENV NO_DECOR=1
 
 RUN \
   echo "**** install packages ****" && \

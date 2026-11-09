@@ -143,9 +143,11 @@ docker run -d \
 | `PASSWORD` | 空 | Web 界面 Basic Auth 密码，**留空则不启用登录校验** |
 | `TITLE` | `ChromiumManager` | 浏览器内界面的应用名（web app manifest 的 `name` / `short_name`） |
 | `DATA_DIR` | `/config/data` | 数据目录：`data.db`、`profiles/`、`screenshots/` 都在下面。直接跑二进制时默认是当前目录的 `data` |
+| `NO_DECOR` | `1` | `1` 去掉窗口边框与标题栏，界面铺满整个桌面，看起来像一个独立应用。判据是变量**是否定义**，传空值同样生效；改成不设值即可恢复带标题栏的窗口模式 |
 
-`PUID` / `PGID` / `TZ` / `LC_ALL` / `CUSTOM_USER` / `PASSWORD` / `TITLE` 由继承的 linuxserver
-基础镜像处理。MCP 相关变量（`MCP_TOKEN`、`MCP_KEYS` 等）见「🤖 MCP 支持 → MCP 环境变量」。
+`PUID` / `PGID` / `TZ` / `LC_ALL` / `CUSTOM_USER` / `PASSWORD` / `TITLE` / `NO_DECOR` 由继承的
+linuxserver 基础镜像处理。MCP 相关变量（`MCP_TOKEN`、`MCP_KEYS` 等）见
+「🤖 MCP 支持 → MCP 环境变量」。
 
 ### Web 界面登录
 
@@ -382,7 +384,7 @@ JSON 的 value 就是配置名。启动时程序会：
 
 Docker 默认给容器套 seccomp 配置，`auto` 因此总是落到关闭沙箱这一支，Chromium 会在窗口顶部
 显示「您使用的是不受支持的命令行标记：--no-sandbox」。容器里要真正启用沙箱，需要同时放开
-seccomp 并设 `CHROME_SANDBOX=1`：
+seccomp 并设 `CHROME_SANDBOX=1`，此时不加 `--no-sandbox`，那条提示也不会出现：
 
 ```bash
 docker run -d --name chromium-manager \
@@ -391,8 +393,10 @@ docker run -d --name chromium-manager \
   ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
 ```
 
-注意 `seccomp=unconfined` 会让整个容器失去 seccomp 过滤，不只是 Chromium。若只是想消掉那条
-提示条、不打算真的开沙箱，把 `CHROME_SANDBOX` 保持 `auto` 并在配置的启动参数里加 `--test-type`。
+注意 `seccomp=unconfined` 会让整个容器失去 seccomp 过滤，不只是 Chromium。
+
+这条提示只是 `--no-sandbox` 的警告文案，可以用 `--test-type` 把它藏掉，但沙箱仍然是关着的，
+镜像不做这种遮盖。
 
 这几个变量都在进程或浏览器启动时读取，改完按「环境变量」一节的说明重建容器。
 

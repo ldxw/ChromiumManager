@@ -62,6 +62,9 @@ services:
       # - DATA_DIR=/config/data
       # 浏览器内界面显示的应用名，默认 ChromiumManager。
       # - TITLE=ChromiumManager
+      # 去掉窗口边框与标题栏，界面铺满整个桌面。判据是变量是否定义，传空值也生效；
+      # 镜像默认已设为 1，想恢复带标题栏的窗口模式就删掉这个变量。
+      # - NO_DECOR=1
 
     ports:
       # Web 界面（HTTPS）
