@@ -2,7 +2,7 @@ name: 构建并推送 Docker 镜像
 
 # 只做一件事：从 Release 取 Chromium 二进制，构建多架构镜像并推送。
 # 默认推到 GHCR，ghcr.io/<owner>/chromium-manager:<版本号>-mcp，不推 latest；
-# 可选额外推一份到阿里云镜像仓库。
+# 可选额外推一份到阿里云镜像仓库或 Docker Hub。
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +18,11 @@ on:
         default: ''
       push_aliyun:
         description: '同时推送到阿里云镜像仓库（需要配置 ALIYUN_* secrets）'
+        required: false
+        type: boolean
+        default: false
+      push_dockerhub:
+        description: '同时推送到 Docker Hub（需要配置 DOCKERHUB_* secrets）'
         required: false
         type: boolean
         default: false
@@ -46,6 +51,7 @@ jobs:
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
           INPUT_PUSH_ALIYUN: ${{ inputs.push_aliyun }}
+          INPUT_PUSH_DOCKERHUB: ${{ inputs.push_dockerhub }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
@@ -99,32 +105,49 @@ jobs:
           if [ "${push_aliyun}" != "true" ]; then
             push_aliyun="false"
           fi
+          push_dockerhub="${INPUT_PUSH_DOCKERHUB}"
+          if [ "${push_dockerhub}" != "true" ]; then
+            push_dockerhub="false"
+          fi
 
-          echo "镜像标签：${image_tag}-mcp，二进制来源：${release_tag}，推送阿里云：${push_aliyun}"
+          echo "镜像标签：${image_tag}-mcp，二进制来源：${release_tag}"
+          echo "推送阿里云：${push_aliyun}，推送 Docker Hub：${push_dockerhub}"
 
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
           echo "owner_lc=${owner_lc}" >> "$GITHUB_OUTPUT"
           echo "image_name=${image_name}" >> "$GITHUB_OUTPUT"
           echo "push_aliyun=${push_aliyun}" >> "$GITHUB_OUTPUT"
+          echo "push_dockerhub=${push_dockerhub}" >> "$GITHUB_OUTPUT"
 
       - name: 检查所需密钥
-        if: ${{ steps.prep.outputs.push_aliyun == 'true' }}
+        if: ${{ steps.prep.outputs.push_aliyun == 'true' || steps.prep.outputs.push_dockerhub == 'true' }}
         env:
+          PUSH_ALIYUN: ${{ steps.prep.outputs.push_aliyun }}
+          PUSH_DOCKERHUB: ${{ steps.prep.outputs.push_dockerhub }}
           ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
           ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
           ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
           ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          [ -n "${ALIYUN_REGISTRY}" ] || { echo "缺少 secrets.ALIYUN_REGISTRY"; exit 1; }
-          [ -n "${ALIYUN_NAMESPACE}" ] || { echo "缺少 secrets.ALIYUN_NAMESPACE"; exit 1; }
-          [ -n "${ALIYUN_USERNAME}" ] || { echo "缺少 secrets.ALIYUN_USERNAME"; exit 1; }
-          [ -n "${ALIYUN_PASSWORD}" ] || { echo "缺少 secrets.ALIYUN_PASSWORD"; exit 1; }
+          if [ "${PUSH_ALIYUN}" = "true" ]; then
+            [ -n "${ALIYUN_REGISTRY}" ] || { echo "缺少 secrets.ALIYUN_REGISTRY"; exit 1; }
+            [ -n "${ALIYUN_NAMESPACE}" ] || { echo "缺少 secrets.ALIYUN_NAMESPACE"; exit 1; }
+            [ -n "${ALIYUN_USERNAME}" ] || { echo "缺少 secrets.ALIYUN_USERNAME"; exit 1; }
+            [ -n "${ALIYUN_PASSWORD}" ] || { echo "缺少 secrets.ALIYUN_PASSWORD"; exit 1; }
+            echo "阿里云密钥检查通过"
+          fi
 
-          echo "阿里云密钥检查通过"
+          if [ "${PUSH_DOCKERHUB}" = "true" ]; then
+            [ -n "${DOCKERHUB_USERNAME}" ] || { echo "缺少 secrets.DOCKERHUB_USERNAME"; exit 1; }
+            [ -n "${DOCKERHUB_TOKEN}" ] || { echo "缺少 secrets.DOCKERHUB_TOKEN"; exit 1; }
+            echo "Docker Hub 密钥检查通过"
+          fi
 
       - name: 从 Release 下载 Chromium 二进制
         env:
@@ -200,6 +223,13 @@ jobs:
           username: ${{ secrets.ALIYUN_USERNAME }}
           password: ${{ secrets.ALIYUN_PASSWORD }}
 
+      - name: 登录 Docker Hub
+        if: ${{ steps.prep.outputs.push_dockerhub == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: 生成镜像标签
         id: tags
         env:
@@ -207,8 +237,10 @@ jobs:
           OWNER_LC: ${{ steps.prep.outputs.owner_lc }}
           IMAGE_NAME: ${{ steps.prep.outputs.image_name }}
           PUSH_ALIYUN: ${{ steps.prep.outputs.push_aliyun }}
+          PUSH_DOCKERHUB: ${{ steps.prep.outputs.push_dockerhub }}
           ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
           ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -224,6 +256,10 @@ jobs:
 
           if [ "${PUSH_ALIYUN}" = "true" ]; then
             add_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
+          fi
+
+          if [ "${PUSH_DOCKERHUB}" = "true" ]; then
+            add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
           fi
 
           if [ -z "${raw_tags}" ]; then
