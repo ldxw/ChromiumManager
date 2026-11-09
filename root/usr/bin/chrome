@@ -6,12 +6,34 @@ if ! pgrep -f ${BIN} > /dev/null;then
   rm -f $HOME/.config/chromium/Singleton*
 fi
 
-# Run normally on privved containers or modified un non priv
-if grep -q 'Seccomp:.0' /proc/1/status; then
-  exec ${BIN} \
-  "$@" > /dev/null 2>&1
-else
-  exec ${BIN} \
-  --no-sandbox \
-  "$@" > /dev/null 2>&1
-fi
+# CHROME_SANDBOX 控制 Chromium 沙箱：
+#   auto（默认）  沿用原行为，按容器 PID 1 的 seccomp 状态判断
+#   1             强制启用沙箱（不加 --no-sandbox）。容器必须放开 seccomp
+#                 （docker run --security-opt seccomp=unconfined），否则 Chromium
+#                 会以 "No usable sandbox!" 启动失败
+#   0             强制关闭沙箱（加 --no-sandbox）
+# 取值不区分大小写，无法识别的值按 auto 处理。
+sandbox_mode="$(printf '%s' "${CHROME_SANDBOX:-auto}" | tr '[:upper:]' '[:lower:]')"
+
+case "${sandbox_mode}" in
+  1|true|yes|on)
+    exec ${BIN} \
+    "$@" > /dev/null 2>&1
+    ;;
+  0|false|no|off)
+    exec ${BIN} \
+    --no-sandbox \
+    "$@" > /dev/null 2>&1
+    ;;
+  *)
+    # Run normally on privved containers or modified un non priv
+    if grep -q 'Seccomp:.0' /proc/1/status; then
+      exec ${BIN} \
+      "$@" > /dev/null 2>&1
+    else
+      exec ${BIN} \
+      --no-sandbox \
+      "$@" > /dev/null 2>&1
+    fi
+    ;;
+esac

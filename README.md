@@ -54,23 +54,32 @@
 
 ## 📦 安装指南
 
-### Docker Compose
+### Docker Compose（推荐）
+
+仓库根目录的 [`docker-compose.yml`](docker-compose.yml) 是一份可直接用的配置，使用 Docker
+默认的 `bridge` 网络，容器端口通过 `ports` 映射到宿主机：
 
 ```yaml
 services:
   chromium-manager:
     image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
     container_name: chromium-manager
+    network_mode: bridge
     shm_size: 1gb
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=Asia/Shanghai
       - LC_ALL=zh_CN.UTF-8
+      # Web 界面 Basic Auth：PASSWORD 留空即不校验；非空时用户名取 CUSTOM_USER（默认 abc）
+      - CUSTOM_USER=
+      - PASSWORD=
       # MCP 相关，按需开启，详见「🤖 MCP 支持」
       - MCP_ENABLE_DESTRUCTIVE=0
       # - MCP_TOKEN=换成你自己的随机串
       # - MCP_HTTP_ADDR=0.0.0.0:10102
+      # Chromium 沙箱，auto 为默认行为；改成 1 还需配合 seccomp 放开
+      # - CHROME_SANDBOX=auto
     ports:
       - 3001:3001
       # 外部 MCP 直连端口，AI 客户端用 http://<宿主机>:10102/mcp
@@ -84,16 +93,25 @@ services:
 docker compose up -d
 ```
 
+`network_mode: bridge` 是显式写出 Docker 的默认网络模式，与 `ports` 映射配合使用。如果你要把
+容器接进自定义网络（例如让别的容器按名字访问），把这一行删掉，改用 `networks:` 指定即可，
+端口映射依然有效。
+
+`shm_size: 1gb` 建议保留：Chromium 多进程渲染依赖共享内存，低于 1GB 容易出现渲染进程崩溃。
+
 ### Docker CLI
 
 ```bash
 docker run -d \
   --name chromium-manager \
   --shm-size=1gb \
+  --network bridge \
   -e PUID=1000 \
   -e PGID=1000 \
   -e TZ=Asia/Shanghai \
   -e LC_ALL=zh_CN.UTF-8 \
+  -e CUSTOM_USER= \
+  -e PASSWORD= \
   -e MCP_ENABLE_DESTRUCTIVE=0 \
   -p 3001:3001 \
   -p 10102:10102 \
@@ -104,6 +122,26 @@ docker run -d \
 
 镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp`，上例中的
 `156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
+
+### Web 界面登录
+
+镜像继承 linuxserver 的基础镜像，Web 界面（3000 / 3001）走 HTTP Basic Auth，由两个环境变量控制：
+
+| 变量 | 作用 |
+| --- | --- |
+| `PASSWORD` | Basic Auth 密码，**留空则不启用登录校验** |
+| `CUSTOM_USER` | Basic Auth 用户名，默认 `abc`，仅在 `PASSWORD` 非空时起作用 |
+
+是否启用鉴权只由 `PASSWORD` 决定：`PASSWORD` 非空时，初始化脚本会生成
+`/etc/nginx/.htpasswd`（用户名取 `CUSTOM_USER`，为空则用 `abc`）并打开 nginx 配置里的
+`auth_basic`，浏览器访问 `https://<宿主机>:3001/` 时弹出登录框；`PASSWORD` 留空则整站
+不做校验，此时单独设置 `CUSTOM_USER` 不起任何作用。
+
+`/mcp` 端点在 nginx 里单独 `auth_basic off;`，不使用这两个变量，只用 `MCP_TOKEN`，
+详见「🤖 MCP 支持」。
+
+如果容器暴露在公网，建议一定要设 `PASSWORD`（用户名可保持默认 `abc`），否则任何能连到
+3001 的人都可以直接操作管理界面。
 
 镜像默认发布到 GHCR（`ghcr.io/<owner>/chromium-manager`），也可以推阿里云镜像仓库或
 Docker Hub，构建由 `.github/workflows/docker-image.yml` 完成：
@@ -187,8 +225,8 @@ curl -k -X POST https://<宿主机>:3001/mcp -H 'Content-Type: application/json'
 
 `/mcp` 这一条 location 关了 nginx 的 Basic Auth（`auth_basic off;`）。HTTP 的
 `Authorization` 头一个请求只能带一种凭据，Basic 与 MCP 自己的 Bearer 同时开启时任何请求
-都会卡在某一层，因此 `/mcp` 只认 Bearer；Web 界面仍走 `CUSTOM_USER` / `PASSWORD`
-的 Basic Auth，两者互不影响。
+都会卡在某一层，因此 `/mcp` 只认 Bearer；Web 界面仍走由 `PASSWORD` 启用的 Basic Auth
+（用户名 `CUSTOM_USER`），两者互不影响。
 
 因为端点现在可以从容器外触达，**强烈建议设置 `MCP_TOKEN`**；不设置时任何能连到该端口的人
 都能调用全部已启用的工具。
@@ -247,13 +285,39 @@ Streamable HTTP（先正常运行程序）：
 | `MCP_ENABLE_DESTRUCTIVE` | 设为 `1` 才注册删除类工具（`delete_profile` / `delete_proxy` / `delete_group` / `stop_all_profiles`） |
 | `MCP_TOKEN` | 仅 HTTP 传输生效；设置后要求 `Authorization: Bearer <token>`，未设置不校验。反代与外部端口都在容器外可触达，建议始终设置 |
 | `MCP_HTTP_ADDR` | 外部直连监听地址，默认 `0.0.0.0:10102`；设为 `127.0.0.1:10102` 仅本机可用，设为 `off` 关闭 |
+| `CHROME_SANDBOX` | 控制 Chromium 沙箱，见下方说明，默认 `auto` |
 
 需要 HTTP 传输鉴权时，在 `docker run` 里再加 `-e MCP_TOKEN=<随机串>`（compose 中放开被注释的那行），
 客户端请求必须带 `Authorization: Bearer <随机串>`，否则返回 401。
 
-镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空）、`MCP_HTTP_ADDR=0.0.0.0:10102`，
-`docker run -e` 或 compose 的 `environment` 会覆盖它们。三个变量都在进程启动时读取一次，
-改了要重启容器才生效。
+#### Chromium 沙箱
+
+`root/usr/bin/chrome` 会根据 `CHROME_SANDBOX` 决定是否给 Chromium 加 `--no-sandbox`：
+
+| 取值 | 行为 |
+| --- | --- |
+| `auto`（默认） | 沿用原逻辑：容器 PID 1 的 `Seccomp` 为 0 时不加，否则加 `--no-sandbox` |
+| `1` / `true` / `yes` / `on` | 强制启用沙箱，不加 `--no-sandbox` |
+| `0` / `false` / `no` / `off` | 强制关闭沙箱，加 `--no-sandbox` |
+| 其它值 | 按 `auto` 处理 |
+
+Docker 默认给容器套 seccomp 配置，`auto` 因此总是落到关闭沙箱这一支，Chromium 会在窗口顶部
+显示「您使用的是不受支持的命令行标记：--no-sandbox」。容器里要真正启用沙箱，需要同时放开
+seccomp 并设 `CHROME_SANDBOX=1`：
+
+```bash
+docker run -d --name chromium-manager \
+  --security-opt seccomp=unconfined \
+  -e CHROME_SANDBOX=1 \
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
+```
+
+注意 `seccomp=unconfined` 会让整个容器失去 seccomp 过滤，不只是 Chromium。若只是想消掉那条
+提示条、不打算真的开沙箱，把 `CHROME_SANDBOX` 保持 `auto` 并在配置的启动参数里加 `--test-type`。
+
+镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空）、`MCP_HTTP_ADDR=0.0.0.0:10102`、
+`CHROME_SANDBOX=auto`，`docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在
+进程或浏览器启动时读取，MCP 相关的改了要重启容器才生效。
 
 ### 工具列表
 

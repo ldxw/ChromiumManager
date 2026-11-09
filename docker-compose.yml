@@ -1,0 +1,59 @@
+# ChromiumManager 部署示例
+#
+# 用法：
+#   1. 把 image 换成你要用的版本，标签形如 <Chromium 版本号>-mcp，镜像不提供 latest
+#   2. 按需放开下面被注释的变量
+#   3. docker compose up -d
+#
+# 详细说明见 README 的「安装指南」与「🤖 MCP 支持」。
+services:
+  chromium-manager:
+    image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
+    container_name: chromium-manager
+
+    # 使用 Docker 默认的 bridge 网络，容器端口经下面的 ports 映射到宿主机。
+    # 要接入自定义网络时删掉这一行，改用 networks: 指定。
+    network_mode: bridge
+
+    # Chromium 多进程渲染需要较大的共享内存，低于 1gb 容易出现渲染进程崩溃
+    shm_size: 1gb
+
+    environment:
+      # ---------- 基础 ----------
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Shanghai
+      - LC_ALL=zh_CN.UTF-8
+
+      # ---------- Web 界面 Basic Auth ----------
+      # 是否启用 Web 界面 Basic Auth 只由 PASSWORD 决定：留空表示不校验；
+      # 非空时才生成 htpasswd 并打开 auth_basic，用户名取 CUSTOM_USER（为空则用 abc）。
+      # MCP 的 /mcp 端点不走 Basic Auth，只用 MCP_TOKEN。
+      - CUSTOM_USER=
+      - PASSWORD=
+
+      # ---------- MCP ----------
+      # 设为 1 才会注册删除类工具（delete_profile / delete_proxy / delete_group /
+      # stop_all_profiles），默认关闭。
+      - MCP_ENABLE_DESTRUCTIVE=0
+      # 反代与外部端口都能从容器外触达，建议始终设置随机串。
+      # - MCP_TOKEN=换成你自己的随机串
+      # 外部直连监听地址，设为 127.0.0.1:10102 仅本机，设为 off 关闭。
+      # - MCP_HTTP_ADDR=0.0.0.0:10102
+
+      # ---------- Chromium 沙箱 ----------
+      # auto 按容器 seccomp 状态判断；1 强制启用（容器需 seccomp=unconfined）；0 强制关闭。
+      # - CHROME_SANDBOX=auto
+
+    ports:
+      # Web 界面（HTTPS）
+      - 3001:3001
+      # Web 界面（HTTP），按需放开
+      # - 3000:3000
+      # 外部 MCP 直连端口，AI 客户端用 http://<宿主机>:10102/mcp
+      - 10102:10102
+
+    volumes:
+      - ./config:/config
+
+    restart: unless-stopped
