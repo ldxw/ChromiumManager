@@ -122,12 +122,22 @@ docker run -d \
   -e CUSTOM_USER= \
   -e PASSWORD= \
   -e MCP_ENABLE_DESTRUCTIVE=0 \
+  -e MCP_TOKEN= \
+  -e MCP_KEYS= \
+  -e MCP_KEYS_FILE= \
+  -e MCP_GROUP_NAME=mcp \
+  -e MCP_HTTP_ADDR=0.0.0.0:10102 \
   -p 3001:3001 \
   -p 10102:10102 \
   -v ./config:/config \
   --restart unless-stopped \
   ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
 ```
+
+上面 `MCP_TOKEN` / `MCP_KEYS` / `MCP_KEYS_FILE` 留空即不启用鉴权与 key 绑定，
+`MCP_GROUP_NAME` 与 `MCP_HTTP_ADDR` 取的就是镜像默认值。要开启时把对应值填进去，
+例如 `-e MCP_KEYS='{"key1":"窗口1","key2":"项目A/窗口1","key3":"项目B/窗口1"}'`，
+value 支持 `配置名` 与 `分组名/配置名` 两种写法，详见「多 key 绑定」。
 
 镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp-keys`，上例中的
 `156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
@@ -207,8 +217,8 @@ sudo chown -R "$(id -u):$(id -g)" ./config
 `auth_basic`，浏览器访问 `https://<宿主机>:3001/` 时弹出登录框；`PASSWORD` 留空则整站
 不做校验，此时单独设置 `CUSTOM_USER` 不起任何作用。
 
-`/mcp` 端点在 nginx 里单独 `auth_basic off;`，不使用这两个变量，只用 `MCP_TOKEN`，
-详见「🤖 MCP 支持」。
+`/mcp` 端点在 nginx 里单独 `auth_basic off;`，不使用这两个变量，只用 `MCP_TOKEN` 或
+`MCP_KEYS` 的 Bearer，详见「🤖 MCP 支持」。
 
 如果容器暴露在公网，建议一定要设 `PASSWORD`（用户名可保持默认 `abc`），否则任何能连到
 3001 的人都可以直接操作管理界面。
@@ -317,7 +327,8 @@ curl http://<宿主机>:10102/healthz   # 返回 ok，可用于探活
 ```
 
 地址由 `MCP_HTTP_ADDR` 控制：改成 `127.0.0.1:10102` 可退回仅本机，设为 `off` 完全关闭。
-鉴权同样读 `MCP_TOKEN`，为空时不校验。
+鉴权与 nginx 反代共用同一套：设了 `MCP_KEYS` 时按 key 查表，否则读 `MCP_TOKEN`，两个都为空
+时不校验。要把端点交给外部使用方，见「多 key 绑定」。
 
 ### 客户端配置
 
@@ -361,7 +372,8 @@ Streamable HTTP（先正常运行程序）：
 | `CHROME_SANDBOX` | `auto` | 控制 Chromium 沙箱，见下方说明 |
 
 需要 HTTP 传输鉴权时，在 `docker run` 里再加 `-e MCP_TOKEN=<随机串>`（compose 中放开被注释的那行），
-客户端请求必须带 `Authorization: Bearer <随机串>`，否则返回 401。
+客户端请求必须带 `Authorization: Bearer <随机串>`，否则返回 401。只想给外部使用方分配独立配置时，
+用 `MCP_KEYS` 代替 `MCP_TOKEN`，见下一节。
 
 ### 多 key 绑定
 

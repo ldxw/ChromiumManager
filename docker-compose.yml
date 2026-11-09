@@ -36,7 +36,7 @@ services:
       # ---------- Web 界面 Basic Auth ----------
       # 是否启用 Web 界面 Basic Auth 只由 PASSWORD 决定：留空表示不校验；
       # 非空时才生成 htpasswd 并打开 auth_basic，用户名取 CUSTOM_USER（为空则用 abc）。
-      # MCP 的 /mcp 端点不走 Basic Auth，只用 MCP_TOKEN。
+      # MCP 的 /mcp 端点不走 Basic Auth，只用 MCP_TOKEN 或 MCP_KEYS 的 Bearer。
       - CUSTOM_USER=
       - PASSWORD=
 
