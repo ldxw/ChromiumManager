@@ -268,7 +268,9 @@ func startServer() {
 
 	// MCP over Streamable HTTP。不限定方法，由 handler 自己回 405 + Allow，
 	// 这样 GET/DELETE 也能走到鉴权和 Allow 逻辑。
-	mux.Handle("/mcp", mcpHTTPHandler(newMCPServer()))
+	// 同一个实例也挂到外部监听端口，两处共用工具注册结果。
+	mcpSrv := newMCPServer()
+	mux.Handle("/mcp", mcpHTTPHandler(mcpSrv))
 
 	// Static files
 	fsSub, _ := fs.Sub(webFS, "web/dist")
@@ -283,6 +285,9 @@ func startServer() {
 			log.Printf("[Server] listen error: %v", err)
 		}
 	}()
+
+	// 外部直连端口，供容器外的 AI 客户端使用。
+	startMCPExternalServer(mcpSrv)
 }
 
 // stopServer shuts the HTTP server down once, giving in-flight requests 5s.
@@ -297,6 +302,7 @@ func stopServer() {
 		if err := httpServer.Shutdown(ctx); err != nil {
 			log.Printf("[Server] forced shutdown: %v", err)
 		}
+		stopMCPExternalServer()
 		log.Printf("[Server] exited gracefully")
 	})
 }
