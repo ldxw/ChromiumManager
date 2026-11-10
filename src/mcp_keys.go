@@ -21,9 +21,14 @@ import (
 //	MCP_KEYS={"key1":"项目A/窗口1","key2":"项目B/窗口1"}      # 各自落到指定分组
 //	MCP_KEYS_FILE=/config/mcp-keys.json   # 与 MCP_KEYS 二选一，MCP_KEYS 优先
 //	MCP_GROUP_NAME=mcp                    # 省写分组时用的默认分组名
+//	MCP_KEY_SLUGS={"key1":"1","key2":"2"} # /chrome-mcp 下发时的文件名后缀，可选
 //
 // value 里的第一个 / 是分组与配置名的分隔符，不带 / 则落到默认分组。配置名本身
 // 不能含 /。启动时按配置建好分组与配置，运行期只做 token → 配置 的内存查表。
+//
+// MCP_KEY_SLUGS 只影响伪装脚本的下载文件名（chrome-mcp-<slug>），不参与鉴权：
+// 没给某个 token 配 slug 时就用 token 本身（非法字符换成 -），所以不设这个变量
+// 也能正常下载，只是文件名可能不好看。
 
 const (
 	defaultMCPGroupName = "mcp"
@@ -36,6 +41,7 @@ type mcpBinding struct {
 	profileID string // encodeID 之后的配置 _id
 	groupName string // 配置所在分组名
 	name      string // 配置名
+	slug      string // 下载伪装脚本时的文件名后缀，默认取 token
 }
 
 // String 用于日志与报错，跨组时带上分组名，避免两个组下的同名配置看起来一样。
@@ -234,6 +240,10 @@ func initMCPKeys() error {
 		if mcpToken() != "" {
 			log.Printf("[MCP] 未设置 MCP_KEYS，沿用单一 MCP_TOKEN 鉴权")
 		}
+		if strings.TrimSpace(os.Getenv("MCP_KEY_SLUGS")) != "" {
+			log.Printf("[MCP] WARNING: 设置了 MCP_KEY_SLUGS 但没有 MCP_KEYS，" +
+				"文件名后缀不生效（单 token 模式下只有 /chrome-mcp 一个下载文件）")
+		}
 		return nil
 	}
 	if mcpToken() != "" {
@@ -260,10 +270,44 @@ func initMCPKeys() error {
 	}
 	sort.Strings(tokens)
 
+	slugs, err := readMCPKeySlugs()
+	if err != nil {
+		return err
+	}
+	// MCP_KEY_SLUGS 里写了 MCP_KEYS 中不存在的 key 时，那条配置不会生效。
+	// 这几乎总是 key 拼错，而静默忽略会让人以为文件名已经改好了，所以点名警告。
+	if len(slugs) > 0 {
+		var unknown []string
+		for token := range slugs {
+			if _, ok := raw[token]; !ok {
+				unknown = append(unknown, maskMCPKey(token))
+			}
+		}
+		if len(unknown) > 0 {
+			sort.Strings(unknown)
+			log.Printf("[MCP] WARNING: MCP_KEY_SLUGS 里的 %s 不在 MCP_KEYS 中，对应的文件名后缀不生效"+
+				"（拼写是否与 key 一致？）", strings.Join(unknown, "、"))
+		}
+	}
+
+	// 先把全部 slug 算好并查重，再进入建分组/建配置的循环：文件名冲突是配置错误，
+	// 应该在写任何数据之前就失败，而不是留下一半建好的分组。
+	slugOf := make(map[string]string, len(raw))
+	usedSlug := make(map[string]string, len(raw))
+	for _, token := range tokens {
+		s := slugForToken(token, slugs[token])
+		if prev, dup := usedSlug[s]; dup {
+			return fmt.Errorf("MCP_KEY_SLUGS：%s 与 %s 的文件名后缀都是「%s」，请改成不同的值",
+				maskMCPKey(prev), maskMCPKey(token), s)
+		}
+		usedSlug[s] = token
+		slugOf[token] = s
+	}
+
 	bindings := make(map[string]*mcpBinding, len(raw))
 	for _, token := range tokens {
 		t := raw[token]
-		b := &mcpBinding{token: token, groupName: t.group, name: t.name}
+		b := &mcpBinding{token: token, groupName: t.group, name: t.name, slug: slugOf[token]}
 		gid, err := groupID(b.groupName)
 		if err != nil {
 			return err
@@ -278,7 +322,8 @@ func initMCPKeys() error {
 		if created {
 			state = "新建"
 		}
-		log.Printf("[MCP] key %s → 配置「%s」（%s）", maskMCPKey(token), b.String(), state)
+		log.Printf("[MCP] key %s → 配置「%s」（%s），下载名 chrome-mcp-%s",
+			maskMCPKey(token), b.String(), state, b.slug)
 	}
 	mcpKeys.bindings = bindings
 	log.Printf("[MCP] 已启用 %d 个 key 绑定，涉及 %d 个分组", len(bindings), len(groupIDs))
@@ -300,6 +345,53 @@ func readMCPKeysConfig(defaultGroup string) (map[string]mcpTarget, string, error
 		return m, "MCP_KEYS_FILE", err
 	}
 	return nil, "", nil
+}
+
+// readMCPKeySlugs 读取 MCP_KEY_SLUGS 文件（可选）。没设置时返回空表。
+func readMCPKeySlugs() (map[string]string, error) {
+	v := strings.TrimSpace(os.Getenv("MCP_KEY_SLUGS"))
+	if v == "" {
+		return nil, nil
+	}
+
+	var raw map[string]string
+	if err := json.Unmarshal([]byte(v), &raw); err != nil {
+		return nil, fmt.Errorf(`解析 MCP_KEY_SLUGS 失败，需要 JSON 对象，形如 {"key1":"1","key2":"2"}：%v`, err)
+	}
+
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		token := strings.TrimSpace(k)
+		if token == "" {
+			return nil, errors.New("MCP_KEY_SLUGS 里存在空的 key")
+		}
+		out[token] = v
+	}
+	return out, nil
+}
+
+// slugForToken 决定下载文件名后缀：优先用 MCP_KEY_SLUGS 给的值，没给就用 token。
+// 结果会拼进 URL 与 Content-Disposition，所以只保留字母、数字、下划线与连字符。
+func slugForToken(token, custom string) string {
+	raw := strings.TrimSpace(custom)
+	if raw == "" {
+		raw = token
+	}
+	var b strings.Builder
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '_', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-.")
+	if s == "" {
+		return "default"
+	}
+	return s
 }
 
 // parseMCPKeys 解析 {"key":"配置名"} 与 {"key":"分组名/配置名"} 两种写法。

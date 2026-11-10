@@ -51,6 +51,13 @@ services:
       # - MCP_KEYS_FILE=/config/mcp-keys.json
       # 省写分组时用的默认分组名，默认 mcp；带「分组名/」的条目不使用它
       # - MCP_GROUP_NAME=mcp
+      # 按 key 下载伪装脚本时的文件名后缀：GET /chrome-mcp-1 得 chrome-mcp-1，
+      # 内容已预填该 key 的凭据，下载后 chmod +x 即用。只影响文件名，不参与鉴权；
+      # 没配的 token 直接用 token 本身。需与 MCP_KEYS 一起用。
+      # - MCP_KEY_SLUGS={"key1":"1","key2":"2"}
+      # 预填脚本里写死的 manager 地址，不设时按请求 Host + MCP_HTTP_ADDR 的端口推断。
+      # 必须是明文 http://（puppeteer 只认 ws://）。
+      # - MCP_SHIM_CDP_URL=http://192.168.1.10:10102
       # 外部直连监听地址，设为 127.0.0.1:10102 仅本机，设为 off 关闭。
       # - MCP_HTTP_ADDR=0.0.0.0:10102
 

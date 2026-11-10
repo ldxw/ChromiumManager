@@ -275,8 +275,9 @@ func startServer() {
 	mcpSrv := newMCPServer()
 	mux.Handle("/mcp", mcpHTTPHandler(mcpSrv))
 
-	// 浏览器伪装脚本的下载入口，供手机/Aurabot 侧的自动化模块取走当「浏览器路径」。
-	mux.HandleFunc("GET /chrome-mcp", serveChromeMCPShim)
+	// 浏览器伪装脚本的下载入口（/chrome-mcp 与 /chrome-mcp-<slug>），供手机/Aurabot
+	// 侧的自动化模块取走当「浏览器路径」。带 slug 的那条没法用 ServeMux 模式表达，
+	// 由 shimHandler 在 mux 前面按前缀分流，见 src/shim.go。
 
 	// DevTools 反向代理：Chromium 只把调试端口绑在 127.0.0.1 上，
 	// --remote-debugging-address 在 156 上不生效（实测 headless/headful 都只监听
@@ -288,7 +289,7 @@ func startServer() {
 	fsSub, _ := fs.Sub(webFS, "web/dist")
 	mux.Handle("/", http.FileServer(http.FS(fsSub)))
 
-	handler := withMiddleware(mux)
+	handler := withMiddleware(shimHandler(mux))
 	httpServer = &http.Server{Addr: serverAddr, Handler: handler}
 
 	go func() {

@@ -126,6 +126,8 @@ docker run -d \
   -e MCP_KEYS= \
   -e MCP_KEYS_FILE= \
   -e MCP_GROUP_NAME=mcp \
+  -e MCP_KEY_SLUGS= \
+  -e MCP_SHIM_CDP_URL= \
   -e MCP_HTTP_ADDR=0.0.0.0:10102 \
   -p 3001:3001 \
   -p 10102:10102 \
@@ -138,6 +140,8 @@ docker run -d \
 `MCP_GROUP_NAME` 与 `MCP_HTTP_ADDR` 取的就是镜像默认值。要开启时把对应值填进去，
 例如 `-e MCP_KEYS='{"key1":"窗口1","key2":"项目A/窗口1","key3":"项目B/窗口1"}'`，
 value 支持 `配置名` 与 `分组名/配置名` 两种写法，详见「多 key 绑定」。
+`MCP_KEY_SLUGS` / `MCP_SHIM_CDP_URL` 只在多 key 下按 key 分发伪装脚本时才需要，
+见「多 key 与浏览器路径脚本」。
 
 镜像不带 `latest`，标签形式为 `<Chromium 版本号>-<变体>`，上例中的 `156.0.8078.79-1`
 即二进制来源的 Release 版本。
@@ -305,6 +309,40 @@ curl -fsS http://<宿主机>:3000/chrome-mcp -o chrome-mcp && chmod +x chrome-mc
 也可以从 10102 外部 MCP 端口取：
 `curl -fsS http://<宿主机>:10102/chrome-mcp -o chrome-mcp && chmod +x chrome-mcp`。
 容器里则直接 `docker cp <容器名>:/usr/local/bin/chrome-mcp .`，同样需要 `chmod +x`。
+
+**按 key 取预填版（多 key 时推荐）。** 设了 `MCP_KEYS` 后，带自己的凭据请求
+`/chrome-mcp-<slug>`，拿到的脚本已经把 `MCP_CDP_TOKEN` 与 `MCP_CDP_HTTP` 的默认值填好，
+下载下来 `chmod +x` 就能直接用，不必再给模块配任何环境变量：
+
+```bash
+# 文件名由 MCP_KEY_SLUGS 决定；没设时就是 token 本身
+curl -fsS -H 'Authorization: Bearer key1' \
+  http://<宿主机>:10102/chrome-mcp-1 -o chrome-mcp-1 && chmod +x chrome-mcp-1
+```
+
+`?token=<key>` 与 Bearer 等价（浏览器里点链接下载时加不了请求头）：
+
+```bash
+curl -fsS 'http://<宿主机>:10102/chrome-mcp-1?token=key1' -o chrome-mcp-1 && chmod +x chrome-mcp-1
+```
+
+| 请求 | 结果 |
+| --- | --- |
+| `/chrome-mcp`，不带凭据 | 通用脚本，文件名 `chrome-mcp`，内容与镜像里的一模一样 |
+| `/chrome-mcp`，带凭据 | 该 key 的预填版，文件名 `chrome-mcp-<slug>` |
+| `/chrome-mcp-<slug>`，带正确凭据 | 预填版，`Content-Disposition` 里的文件名是 `chrome-mcp-<slug>` |
+| `/chrome-mcp-<slug>`，不带凭据 | 401（带 `WWW-Authenticate: Bearer`） |
+| `/chrome-mcp-<slug>`，凭据是别人的 | 403，只说明「该凭据只能下载自己的文件」 |
+| `/chrome-mcp-<slug>`，slug 不存在 | 403（先校验凭据再判定，所以不会因为「401 vs 403」枚举出哪些 slug 存在） |
+| 单 `MCP_TOKEN` 模式下带任何 slug | 404，该模式没有按 key 区分的文件 |
+
+预填只写入 `CDP_TOKEN` 与 `CDP_HTTP` 两个默认值，`CDP_PROFILE` 仍留空——多 key 时它本来
+就该留空，`/cdp` 会落到该 key 绑定的配置。环境变量优先级高于脚本里的默认值，所以模块
+自己设了 `MCP_CDP_HTTP` / `MCP_CDP_TOKEN` 时仍以模块为准。
+
+`CDP_HTTP` 的取值顺序：`MCP_SHIM_CDP_URL`（显式指定，原样使用）→ `MCP_HTTP_ADDR` 里的
+端口拼到本次请求的 Host 上 → `http://<请求 Host>`。一律给明文 `http://`，因为 puppeteer
+只认 `ws://`；经 3001（HTTPS）下载时也会被改写成明文端口。
 
 **`chmod +x` 不能省。** HTTP 响应不携带权限位，`curl -o` 建出来的文件权限由 umask 决定
 （通常是 `0644` / `0664`），没有执行位。模块拿这个路径去 `spawn` 时内核直接返回
@@ -527,7 +565,8 @@ curl -k -X POST https://<宿主机>:3001/mcp -H 'Content-Type: application/json'
 ### 外部直连端口
 
 除 nginx 反代之外，程序还会另起一个独立的 MCP 监听，默认 `0.0.0.0:10102`，挂 `/mcp`、
-`/healthz`、`/chrome-mcp`、`/cdp` 四条路由，不暴露管理界面，也不经过 Basic Auth：
+`/healthz`、`/chrome-mcp`（含预填版 `/chrome-mcp-<slug>`）、`/cdp` 这几条路由，不暴露管理
+界面，也不经过 Basic Auth：
 
 ```bash
 docker run ... -p 10102:10102 ...
@@ -608,6 +647,8 @@ Streamable HTTP（先正常运行程序）：
 | `MCP_KEYS` | 空 | 多 key 绑定，JSON 对象，value 写 `配置名` 或 `分组名/配置名`，见「多 key 绑定」。设置后优先于 `MCP_TOKEN` |
 | `MCP_KEYS_FILE` | 空 | 从文件读取上面那份 JSON；与 `MCP_KEYS` 同时设置时以 `MCP_KEYS` 为准 |
 | `MCP_GROUP_NAME` | `mcp` | 省写分组时用的默认分组名；value 里带 `分组名/` 的条目不受它影响 |
+| `MCP_KEY_SLUGS` | 空 | `/chrome-mcp-<slug>` 的文件名后缀，JSON 对象，形如 `{"key1":"1","key2":"2"}`。只影响下载文件名，不参与鉴权；未配置的 token 用 token 本身。需与 `MCP_KEYS` 一起用 |
+| `MCP_SHIM_CDP_URL` | 空 | 预填版脚本里写死的 `CDP_HTTP`（manager 地址）。不设时按请求 Host 加 `MCP_HTTP_ADDR` 的端口推断；必须给明文 `http://` |
 | `MCP_HTTP_ADDR` | `0.0.0.0:10102` | 外部直连监听地址；设为 `127.0.0.1:10102` 仅本机可用，设为 `off` 关闭。空值按默认处理，`0` / `false` 与 `off` 等价 |
 | `MCP_SHIM_PATH` | `/usr/local/bin/chrome-mcp` | `/chrome-mcp` 要下发的脚本在本机的位置。镜像里已放在默认路径，只在自建镜像改了位置时才需要设 |
 | `CHROME_SANDBOX` | `auto` | 控制 Chromium 沙箱，见下方说明 |
@@ -697,21 +738,135 @@ docker run -d --name chromium-manager \
 
 ```bash
 # 容器
--e MCP_KEYS='{"key1":"项目A/窗口1","key2":"项目A/窗口2"}'
+-e MCP_KEYS='{"key1":"项目A/窗口1","key2":"项目A/窗口2"}' \
+-e MCP_KEY_SLUGS='{"key1":"1","key2":"2"}'
 
-# 使用方 1 的模块环境变量
-MCP_CDP_HTTP=http://<宿主机>:10102
-MCP_CDP_TOKEN=key1
+# 使用方 1：下载 chrome-mcp-1，不用再配环境变量
+curl -fsS 'http://<宿主机>:10102/chrome-mcp-1?token=key1' -o chrome-mcp-1 && chmod +x chrome-mcp-1
 
 # 使用方 2
-MCP_CDP_HTTP=http://<宿主机>:10102
-MCP_CDP_TOKEN=key2
+curl -fsS 'http://<宿主机>:10102/chrome-mcp-2?token=key2' -o chrome-mcp-2 && chmod +x chrome-mcp-2
 ```
 
-`/chrome-mcp` 这个下载路由本身不校验（脚本里没有密钥），任何能连到端口的人都能取到；
-真正的访问控制是靠 `/cdp` 那一步的 key 校验，取到脚本但没有 key 的人连不上任何实例。
-所以把 10102 开到公网时，`/chrome-mcp` 不构成额外的暴露面，但 `MCP_KEYS` / `MCP_TOKEN`
-必须设。
+不带凭据时 `/chrome-mcp` 仍返回通用脚本（脚本里没有任何密钥），任何能连到端口的人都能
+取到；预填版则要求请求自己带上该 key。两条路径的真正访问控制都在 `/cdp` 那一步的 key
+校验上——取到通用脚本但没有 key 的人连不上任何实例。所以把 10102 开到公网时，
+`MCP_KEYS` / `MCP_TOKEN` 必须设。
+
+`MCP_KEY_SLUGS` 只决定文件名后缀，不参与鉴权：没给某个 token 配 slug 时用 token 本身
+（非 `[A-Za-z0-9_.-]` 的字符换成 `-`，首尾的 `-` / `.` 去掉），所以不设这个变量也能正常下载。
+两个 token 算出同一个 slug 时启动直接失败，不会让两个 key 抢同一个文件。
+
+`MCP_KEY_SLUGS` 的 key 必须与 `MCP_KEYS` 里的 key 逐字一致，value 是你要的后缀：
+
+| 写法 | 结果 |
+| --- | --- |
+| 不设 `MCP_KEY_SLUGS` | 文件名回退成 token：`chrome-mcp-key1` |
+| `{"key1":"key1"}` | 与不设相同，`chrome-mcp-key1`。值写成 token 没有额外意义 |
+| `{"key1":"1"}` | `chrome-mcp-1` |
+| `{"key1":"1","key2":"1"}` | 启动失败：两个 key 抢同一个文件名 |
+| `{"kye1":"1"}`（key 拼错） | 启动警告并忽略这条，文件名仍是 `chrome-mcp-key1`；`/chrome-mcp-1` 返回 403 |
+| 只设 `MCP_KEY_SLUGS` 不设 `MCP_KEYS` | 启动警告，后缀不生效（单 token 模式只有 `/chrome-mcp`） |
+
+后缀只出现在路径与 `Content-Disposition` 里，不影响鉴权——访问 `/chrome-mcp-1` 时校验的仍
+是请求自己带的 key。所以**知道别人的后缀也拿不到别人的文件**，只会得到 403。
+
+#### 按 key 分发脚本：完整配置
+
+这一节把 `MCP_KEYS`、`MCP_KEY_SLUGS`、`MCP_SHIM_CDP_URL` 三者的关系讲完。只想让 AI 客户端
+连上 `/mcp` 的，读「多 key 绑定」就够了；要让手机/自动化模块拿到**下载即用**的浏览器路径，
+按下面配。
+
+**一、服务端（容器）**
+
+```yaml
+environment:
+  - MCP_KEYS={"key1":"项目A/窗口1","key2":"项目A/窗口2"}
+  - MCP_KEY_SLUGS={"key1":"1","key2":"2"}
+  # 可选：脚本里写死的 manager 地址。不设时按请求 Host + MCP_HTTP_ADDR 的端口推断
+  - MCP_SHIM_CDP_URL=http://192.168.1.10:10102
+```
+
+三个人各管一件事，互不替代：
+
+| 变量 | 决定什么 | 不设时 |
+| --- | --- | --- |
+| `MCP_KEYS` | 谁是合法凭据、各自操作哪个配置 | 退回单一 `MCP_TOKEN` 模式，不生成预填版 |
+| `MCP_KEY_SLUGS` | 下载文件名里的后缀（也就是 URL 里的 `<slug>`） | 用 token 本身当后缀 |
+| `MCP_SHIM_CDP_URL` | 预填进脚本的 `CDP_HTTP`（manager 地址） | 按请求 Host + `MCP_HTTP_ADDR` 端口推断 |
+
+**二、使用方（手机/自动化模块）**
+
+每个使用方只需一条命令，不用再配任何环境变量：
+
+```bash
+curl -fsS 'http://192.168.1.10:10102/chrome-mcp-1?token=key1' -o chrome-mcp-1
+chmod +x chrome-mcp-1
+```
+
+`chmod +x` 必须做：HTTP 响应不带权限位，`curl -o` 建出来是 `0644`，直接 spawn 会 `EACCES`。
+Android 上还要放在可执行目录（Termux 的 `$PREFIX/bin` 等），`/sdcard` 是 `noexec` 挂载。
+
+**三、`CDP_HTTP` 是怎么定下来的**
+
+按顺序取第一个可用的：
+
+1. `MCP_SHIM_CDP_URL`（原样使用，去掉末尾 `/`）；
+2. `MCP_HTTP_ADDR` 里的端口，配到**本次请求的 Host** 上——所以从手机访问
+   `http://192.168.1.10:10102/chrome-mcp-1` 拿到的就是 `http://192.168.1.10:10102`；
+3. `MCP_HTTP_ADDR=off` 时退回**请求自己的端口**（例如经 3000 下载就给 `http://<host>:3000`）；
+4. 请求也没带端口时给 `http://<host>`。
+
+一律是明文 `http://`，哪怕你从 3001（HTTPS）下载——puppeteer 的正则
+`/^DevTools listening on (ws:\/\/.*)$/` 只认 `ws://`，给 `wss://` 会一直等到 25s 超时。
+
+实测三种取值：
+
+| 配置 | 请求 | 预填的 `CDP_HTTP` |
+| --- | --- | --- |
+| `MCP_HTTP_ADDR=127.0.0.1:10132` | `http://127.0.0.1:10132/...` | `http://127.0.0.1:10132` |
+| 同上 + `MCP_SHIM_CDP_URL=http://lan.example:9999/` | 同上 | `http://lan.example:9999` |
+| `MCP_HTTP_ADDR=off` | `http://127.0.0.1:10101/...` | `http://127.0.0.1:10101` |
+
+`MCP_SHIM_CDP_URL` 的典型用途：容器放在反代/隧道后面，外面看到的主机名与请求 Host 不一致
+（`https://cm.example.com` → 容器 10102），这时直接写 `MCP_SHIM_CDP_URL=http://<内网可达地址>:10102`。
+
+**四、后缀的合法字符**
+
+非 `[A-Za-z0-9_.-]` 的字符逐个换成 `-`，再去掉首尾的 `-` 与 `.`，结果为空时用 `default`。
+所以 `{"key1":"项目1"}` 会得到 `chrome-mcp---1`（两个汉字各换一个 `-`），不推荐；用
+数字或短横线最省事。后缀同时也是 `Content-Disposition` 里的文件名，不会改变鉴权。
+
+**五、常见配错与表现**
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 启动日志 `WARNING: MCP_KEY_SLUGS 里的 **** 不在 MCP_KEYS 中` | `MCP_KEY_SLUGS` 的 key 拼错（区分大小写、不能带空格） | 改成与 `MCP_KEYS` 的 key 完全一致 |
+| 启动日志 `WARNING: 设置了 MCP_KEY_SLUGS 但没有 MCP_KEYS` | 只配了后缀，没配多 key | 补 `MCP_KEYS`，或删掉 `MCP_KEY_SLUGS` |
+| 启动失败 `文件名后缀都是「x」，请改成不同的值` | 两个 key 给了同一后缀 | 改成各自不同的值；失败发生在建分组之前，不会残留数据 |
+| `curl /chrome-mcp-1` 得 401 | 没带凭据 | 加 `-H 'Authorization: Bearer key1'` 或 `?token=key1` |
+| `curl /chrome-mcp-2` 带 key1 得 403 | 用了别人的后缀 | 换成自己的后缀；后缀不构成越权，只会被拒 |
+| `curl /chrome-mcp-1` 带 key1 得 403 | 后缀拼错（该 key 的实际后缀是别的） | 看启动日志 `下载名 chrome-mcp-<slug>`，或直接请求 `/chrome-mcp` 看 `Content-Disposition` |
+| `curl /chrome-mcp-1` 得 404 | 单 `MCP_TOKEN` 模式，没有按 key 区分的文件 | 只用 `/chrome-mcp` |
+| 下载后 `./chrome-mcp --version` 报 `Permission denied` | 没 `chmod +x` | `chmod +x chrome-mcp-1` |
+| 模块报 `Timed out ... waiting for the WS endpoint URL` | `CDP_HTTP` 是 `https`（拿到了 `wss://`） | 改用明文端口，或设 `MCP_SHIM_CDP_URL=http://...` |
+
+**六、这几种“两处都填”的写法**
+
+- **同一个 key 在 `MCP_KEYS` 与 `MCP_KEY_SLUGS` 各出现一次**——这是正常且必需的，前者是凭据，
+  后者是文件名。不是同一件事填两遍。
+- **`MCP_KEY_SLUGS` 的值恰好等于 token**（`{"key1":"key1"}`）——合法，等价于不设，
+  文件名 `chrome-mcp-key1`。
+- **两个 key 用同一个后缀**——拒绝启动，因为一个 URL 只能对应一个文件。
+- **`MCP_KEY_SLUGS` 写了 `MCP_KEYS` 里没有的 key**——警告并忽略；不会创建凭据，也不会变成
+  可用文件名。
+- **同一个配置名被两个 key 绑定**（`{"key1":"窗口1","key2":"窗口1"}`）——拒绝启动，
+  和上面那条规则一样属于「歧义」类错误。
+
+**七、只想要一个文件、不想要多 key**
+
+不设 `MCP_KEYS`，设 `MCP_TOKEN`。此时只有 `/chrome-mcp` 一个下载入口：带对凭据得到预填
+`MCP_TOKEN` 的版本，不带凭据得到通用脚本。`MCP_KEY_SLUGS` 在这种模式下不生效（会给警告）。
 
 **多 key 按配置隔离，不按标签页隔离。** 一个 key 对应一个配置（也就是一个浏览器实例），
 实例内部只绑定第一个页面；同一个实例里开多个标签页要靠 CDP 侧自己 `newPage()`，与 key 无关。
@@ -743,8 +898,9 @@ docker run -d --name chromium-manager \
 这条提示只是 `--no-sandbox` 的警告文案，可以用 `--test-type` 把它藏掉，但沙箱仍然是关着的，
 镜像不做这种遮盖。
 
-镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=` / `MCP_KEYS=` / `MCP_KEYS_FILE=`（空）、
-`MCP_GROUP_NAME=mcp`、`MCP_HTTP_ADDR=0.0.0.0:10102`、`CHROME_SANDBOX=auto`，
+镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=` / `MCP_KEYS=` / `MCP_KEYS_FILE=` /
+`MCP_KEY_SLUGS=` / `MCP_SHIM_CDP_URL=`（空）、`MCP_GROUP_NAME=mcp`、
+`MCP_HTTP_ADDR=0.0.0.0:10102`、`CHROME_SANDBOX=auto`，
 `docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在
 进程或浏览器启动时读取，MCP 相关的改了要重启容器才生效。
 

@@ -10,8 +10,9 @@ import (
 )
 
 // MCP 外部监听端口：给容器外的 AI 客户端直连，不经过 nginx 反代，
-// 也不带 Web 界面的 Basic Auth。只挂 /mcp、/healthz、/chrome-mcp、/cdp
-// 四条路由，管理界面不会因此暴露。
+// 也不带 Web 界面的 Basic Auth。只挂 /mcp、/healthz、/chrome-mcp（含
+// /chrome-mcp-<slug>，由 shimHandler 分流）、/cdp 这几条路由，管理界面
+// 不会因此暴露。
 //
 // 通过 MCP_HTTP_ADDR 配置，默认 0.0.0.0:10102；设为空、off 或 0 则关闭。
 // 鉴权沿用 MCP_TOKEN 或 MCP_KEYS：都为空时不校验，只适合本机或受控网络。
@@ -41,14 +42,13 @@ func startMCPExternalServer(s *mcpServer) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpHTTPHandler(s))
-	mux.HandleFunc("GET /chrome-mcp", serveChromeMCPShim)
 	registerCDPProxy(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("ok"))
 	})
 
-	mcpExtServer = &http.Server{Addr: addr, Handler: withMiddleware(mux)}
+	mcpExtServer = &http.Server{Addr: addr, Handler: withMiddleware(shimHandler(mux))}
 
 	if !mcpKeys.enabled() && mcpToken() == "" {
 		log.Printf("[MCP] WARNING: 外部端口 %s 未设置 MCP_TOKEN 也未设置 MCP_KEYS，"+

@@ -115,13 +115,13 @@ RUN printf '%s\n' \
     '    client_max_body_size    8m;' \
     '    proxy_pass              http://127.0.0.1:10101;' \
     '  }' \
-    '  location = /chrome-mcp {' \
+    '  location ^~ /chrome-mcp {' \
     '    auth_basic off;' \
     '    proxy_set_header        Host $host;' \
     '    proxy_set_header        X-Real-IP $remote_addr;' \
     '    proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;' \
     '    proxy_http_version      1.1;' \
-    '    proxy_pass              http://127.0.0.1:10101/chrome-mcp;' \
+    '    proxy_pass              http://127.0.0.1:10101;' \
     '  }' \
     '  location /cdp {' \
     '    auth_basic off;' \
@@ -141,7 +141,7 @@ RUN printf '%s\n' \
   sed -i '/error_page 500 502 503 504/r /tmp/mcp-location.conf' /defaults/default.conf && \
   rm -f /tmp/mcp-location.conf && \
   test "$(grep -c 'location /mcp' /defaults/default.conf)" -eq 2 && \
-  test "$(grep -c 'location = /chrome-mcp' /defaults/default.conf)" -eq 2 && \
+  test "$(grep -c 'location ^~ /chrome-mcp' /defaults/default.conf)" -eq 2 && \
   test "$(grep -c 'location /cdp' /defaults/default.conf)" -eq 2 && \
   test "$(grep -c 'auth_basic off;' /defaults/default.conf)" -eq 6
 
