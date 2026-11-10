@@ -18,8 +18,9 @@
 # 环境变量：
 #   MCP_CDP_HTTP     manager 的地址，默认 http://127.0.0.1:10102
 #                    手机/局域网用 http://<宿主机>:10102
-#   MCP_CDP_PROFILE  配置 _id；留空时取唯一运行中的实例，多于一个会报错并列出候选
-#   MCP_CDP_TOKEN    MCP_TOKEN；manager 设了它时必填
+#   MCP_CDP_PROFILE  配置 _id；留空时取唯一运行中的实例，多于一个会报错并列出候选。
+#                    manager 设了 MCP_KEYS 时留空即可，会自动落到该 key 绑定的配置
+#   MCP_CDP_TOKEN    manager 的凭据：设了 MCP_KEYS 就填分配给你的 key，否则填 MCP_TOKEN；必填
 #   MCP_CDP_WS       直接给出 ws 地址，跳过 HTTP 查询（故障排查用）
 #   MCP_CDP_TIMEOUT  等待端点就绪的秒数，默认 20（puppeteer 自己的上限是 30s）
 #   MCP_CDP_VERSION  --version 时输出的版本号，默认 156.0.8078.79
@@ -130,7 +131,7 @@ if [ -z "$CDP_WS" ]; then
     printf 'chrome-mcp: 服务端返回：%s\n' "$last" >&2
   fi
   printf 'chrome-mcp: 确认容器里已有实例在运行，且 MCP_CDP_HTTP 指向 manager 的地址\n' >&2
-  printf 'chrome-mcp: 设了 MCP_TOKEN 时还要提供 MCP_CDP_TOKEN\n' >&2
+  printf 'chrome-mcp: 设了 MCP_TOKEN 或 MCP_KEYS 时还要提供 MCP_CDP_TOKEN（多 key 时填你的 key）\n' >&2
   exit 1
 fi
 

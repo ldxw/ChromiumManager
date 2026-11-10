@@ -62,7 +62,7 @@
 ```yaml
 services:
   chromium-manager:
-    image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
+    image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
     container_name: chromium-manager
     network_mode: bridge
     shm_size: 1gb
@@ -131,7 +131,7 @@ docker run -d \
   -p 10102:10102 \
   -v ./config:/config \
   --restart unless-stopped \
-  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
 ```
 
 上面 `MCP_TOKEN` / `MCP_KEYS` / `MCP_KEYS_FILE` 留空即不启用鉴权与 key 绑定，
@@ -139,8 +139,11 @@ docker run -d \
 例如 `-e MCP_KEYS='{"key1":"窗口1","key2":"项目A/窗口1","key3":"项目B/窗口1"}'`，
 value 支持 `配置名` 与 `分组名/配置名` 两种写法，详见「多 key 绑定」。
 
-镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp`，上例中的
-`156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
+镜像不带 `latest`，标签形式为 `<Chromium 版本号>-<变体>`，上例中的 `156.0.8078.79-1`
+即二进制来源的 Release 版本。
+
+`-mcp` 后缀是只支持单个 `MCP_TOKEN` 的修复版，`-mcp-keys` 是支持 `MCP_KEYS` 多 key
+绑定的版本（同样包含前者的全部修复）；两个标签各自独立发布，构建其中一个不会覆盖另一个。
 
 `-e PUID=$(id -u)` 取的是执行这条命令的用户，适合在宿主机上直接跑；在别的机器上准备
 compose 文件时，换成目标宿主机 `id -u` / `id -g` 的实际数字。
@@ -431,14 +434,14 @@ Docker Hub，构建由 `.github/workflows/docker-image.yml` 完成：
 - `push_ghcr` **默认勾选**，取消后本次完全不碰 GHCR，可以只推阿里云或 Docker Hub。
   GHCR 鉴权用仓库自带的 `GITHUB_TOKEN`，不需要额外 secret。
 - 勾选 `push_aliyun` 后推送一份到
-  `<ALIYUN_REGISTRY>/<ALIYUN_NAMESPACE>/chromium-manager:<版本号>-mcp`，
+  `<ALIYUN_REGISTRY>/<ALIYUN_NAMESPACE>/chromium-manager:<版本号>-mcp-keys`，
   需要在仓库 Secrets 里配置 `ALIYUN_REGISTRY`、`ALIYUN_NAMESPACE`、
   `ALIYUN_USERNAME`、`ALIYUN_PASSWORD`；缺任意一个会在构建前直接失败。
 - 勾选 `push_dockerhub` 后推送一份到
-  `<DOCKERHUB_USERNAME>/chromium-manager:<版本号>-mcp`，需要在仓库 Secrets 里配置
+  `<DOCKERHUB_USERNAME>/chromium-manager:<版本号>-mcp-keys`，需要在仓库 Secrets 里配置
   `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`；缺任意一个会在构建前直接失败。
 - 三个开关可以任意组合，至少勾选一个；全不勾选会在解析参数阶段直接失败。
-- 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp` 后缀。
+- 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp-keys` 后缀。
 - 构建失败会自动重试最多 3 次，用于绕过拉取基础镜像时的偶发 429。
 - GHCR 与 Docker Hub 保留 buildx 默认的 provenance attestation。勾选 `push_aliyun` 时，
   阿里云那份会**单独再推一次**，关闭 provenance 与 SBOM，并固定输出 Docker schema2
@@ -606,6 +609,7 @@ Streamable HTTP（先正常运行程序）：
 | `MCP_KEYS_FILE` | 空 | 从文件读取上面那份 JSON；与 `MCP_KEYS` 同时设置时以 `MCP_KEYS` 为准 |
 | `MCP_GROUP_NAME` | `mcp` | 省写分组时用的默认分组名；value 里带 `分组名/` 的条目不受它影响 |
 | `MCP_HTTP_ADDR` | `0.0.0.0:10102` | 外部直连监听地址；设为 `127.0.0.1:10102` 仅本机可用，设为 `off` 关闭。空值按默认处理，`0` / `false` 与 `off` 等价 |
+| `MCP_SHIM_PATH` | `/usr/local/bin/chrome-mcp` | `/chrome-mcp` 要下发的脚本在本机的位置。镜像里已放在默认路径，只在自建镜像改了位置时才需要设 |
 | `CHROME_SANDBOX` | `auto` | 控制 Chromium 沙箱，见下方说明 |
 
 需要 HTTP 传输鉴权时，在 `docker run` 里再加 `-e MCP_TOKEN=<随机串>`（compose 中放开被注释的那行），
@@ -622,7 +626,7 @@ docker run -d --name chromium-manager \
   -e MCP_KEYS='{"key1":"窗口1","key2":"窗口2"}' \
   -e MCP_GROUP_NAME=mcp \
   -p 10102:10102 \
-  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
 ```
 
 上面的 value 只有配置名，会落到 `MCP_GROUP_NAME`（默认 `mcp`）这一个分组里。要让不同的使用方
@@ -731,7 +735,7 @@ seccomp 并设 `CHROME_SANDBOX=1`，此时不加 `--no-sandbox`，那条提示�
 docker run -d --name chromium-manager \
   --security-opt seccomp=unconfined \
   -e CHROME_SANDBOX=1 \
-  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
 ```
 
 注意 `seccomp=unconfined` 会让整个容器失去 seccomp 过滤，不只是 Chromium。
@@ -739,8 +743,9 @@ docker run -d --name chromium-manager \
 这条提示只是 `--no-sandbox` 的警告文案，可以用 `--test-type` 把它藏掉，但沙箱仍然是关着的，
 镜像不做这种遮盖。
 
-镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空）、`MCP_HTTP_ADDR=0.0.0.0:10102`、
-`CHROME_SANDBOX=auto`，`docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在
+镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=` / `MCP_KEYS=` / `MCP_KEYS_FILE=`（空）、
+`MCP_GROUP_NAME=mcp`、`MCP_HTTP_ADDR=0.0.0.0:10102`、`CHROME_SANDBOX=auto`，
+`docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在
 进程或浏览器启动时读取，MCP 相关的改了要重启容器才生效。
 
 ### 工具列表
