@@ -1,14 +1,14 @@
 # ChromiumManager 部署示例
 #
 # 用法：
-#   1. 把 image 换成你要用的版本，标签形如 <Chromium 版本号>-mcp-keys，镜像不提供 latest
+#   1. 把 image 换成你要用的版本，标签形如 <Chromium 版本号>-mcp，镜像不提供 latest
 #   2. 按需放开下面被注释的变量
 #   3. docker compose up -d
 #
 # 详细说明见 README 的「安装指南」与「🤖 MCP 支持」。
 services:
   chromium-manager:
-    image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
+    image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
     container_name: chromium-manager
 
     # 使用 Docker 默认的 bridge 网络，容器端口经下面的 ports 映射到宿主机。
@@ -20,17 +20,13 @@ services:
 
     environment:
       # ---------- 基础 ----------
-      # 容器内 abc 用户的 UID / GID，也是 ./config 的属主。改成宿主机用户的
-      # id -u / id -g，./config 下的文件才会归你，浏览器配置目录也能直接编辑。
-      # 1000 是多数桌面发行版第一个普通用户的 uid。镜像默认的 911 落在系统账号
-      # 区间（100-999），Linux 上不对应任何真实用户。
-      # 必须在第一次 up 之前定好：基础镜像只改 ./config 这一层不递归，
-      # 之后改值不会修好旧文件。
+      # PUID / PGID：容器内 abc 用户的 UID / GID，也是 ./config 的属主。
+      # 1000 是多数桌面发行版第一个普通用户的 uid，请换成自己的 id -u / id -g。
+      # 镜像默认的 911 落在系统账号区间（100-999），Linux 上不对应任何真实用户。
+      # 必须在第一次 up 之前定好：基础镜像只改 ./config 这一层不递归，之后改值不会修好旧文件。
       - PUID=1000
       - PGID=1000
-      # 容器时区，影响日志时间与浏览器里的本地时间；镜像默认 UTC。
       - TZ=Asia/Shanghai
-      # 容器 locale，影响桌面与 Chromium 界面语言；镜像内置 zh_CN.utf8。
       - LC_ALL=zh_CN.UTF-8
 
       # ---------- Web 界面 Basic Auth ----------
@@ -77,6 +73,7 @@ services:
       # 重建管道。锁定后服务端进入 manual 模式，客户端的 resize 请求被直接忽略。
       # 镜像默认已锁 1920x1080，一般不用改。手机想更清晰可一起升到 2560x1440（前提是
       # 手机解得动）；两个值必须一起改，只设一个时另一个会被补成 1024/768。
+      # 手机上看不清时优先用双指捏合放大（镜像已放开 viewport 与两指手势），不必调这里。
       # - SELKIES_MANUAL_WIDTH=1920
       # - SELKIES_MANUAL_HEIGHT=1080
 
@@ -86,6 +83,14 @@ services:
       # Web 界面（HTTP），按需放开
       # - 3000:3000
       # 外部 MCP 直连端口，AI 客户端用 http://<宿主机>:10102/mcp
+      #
+      # 外部自动化模块（手机上的刷抖音一类）也走这条：镜像里的伪装脚本
+      # /usr/local/bin/chrome-mcp 被当「浏览器路径」调用时，会从
+      # http://<宿主机>:10102/cdp 取该实例的 DevTools 地址。DevTools 本身只绑
+      # 127.0.0.1，由 manager 的 /cdp 反代转出来，所以**不需要**再映射 9222，
+      # 也不用给实例配 --remote-debugging-port；默认的随机端口即可。
+      # 鉴权沿用 MCP_TOKEN，模块侧设 MCP_CDP_TOKEN。详见 README
+      # 「给外部自动化模块提供浏览器路径」。
       - 10102:10102
 
     volumes:

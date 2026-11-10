@@ -1,7 +1,7 @@
 name: 构建并推送 Docker 镜像
 
 # 只做一件事：从 Release 取 Chromium 二进制，构建多架构镜像并推送。
-# 默认推到 GHCR，ghcr.io/<owner>/chromium-manager:<版本号>-mcp-keys，不推 latest；
+# 默认推到 GHCR，ghcr.io/<owner>/chromium-manager:<版本号>-mcp，不推 latest；
 # 也可以关掉 GHCR，只推阿里云或 Docker Hub。
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
         type: string
         default: ''
       image_tag:
-        description: '镜像标签（不含 -mcp-keys 后缀），留空则跟随 Release 标签'
+        description: '镜像标签（不含 -mcp 后缀），留空则跟随 Release 标签'
         required: false
         type: string
         default: ''
@@ -126,7 +126,7 @@ jobs:
             exit 1
           fi
 
-          echo "镜像标签：${image_tag}-mcp-keys，二进制来源：${release_tag}"
+          echo "镜像标签：${image_tag}-mcp，二进制来源：${release_tag}"
           echo "推送 GHCR：${push_ghcr}，阿里云：${push_aliyun}，Docker Hub：${push_dockerhub}"
 
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
@@ -264,7 +264,7 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          # 每个版本只推一个标签：<版本号>-mcp-keys，不推 latest
+          # 每个版本只推一个标签：<版本号>-mcp，不推 latest
           #
           # 阿里云 ACR 不认 attestation manifest，所以它的标签单独成一组，构建时分两次推：
           # 其余目标用 buildx 默认（带 provenance），阿里云那组用 --provenance=false。
@@ -281,15 +281,15 @@ jobs:
           }
 
           if [ "${PUSH_GHCR}" = "true" ]; then
-            add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${IMAGE_TAG}-mcp-keys"
+            add_tag "ghcr.io/${OWNER_LC}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
           fi
 
           if [ "${PUSH_DOCKERHUB}" = "true" ]; then
-            add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}-mcp-keys"
+            add_tag "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
           fi
 
           if [ "${PUSH_ALIYUN}" = "true" ]; then
-            add_aliyun_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}-mcp-keys"
+            add_aliyun_tag "${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}-mcp"
           fi
 
           if [ -z "${raw_tags}" ] && [ -z "${raw_aliyun_tags}" ]; then
@@ -332,6 +332,18 @@ jobs:
       # --provenance=false --sbom=false（--sbom 在 buildx 默认就是 false，这里写明意图）。
       # 第二次构建复用第一次在 buildkit 里留下的层缓存，实际只是重新组 manifest 并推送。
       # 两组互不影响：只推阿里云时第一组为空直接跳过，阿里云那次就是首次构建。
+      #
+      # 阿里云那组还要固定输出 Docker schema2（--output type=image,oci-mediatypes=false）。
+      # buildx 是否输出 OCI image index 取决于 buildkit 版本：同样加 --provenance=false，
+      # buildkit 0.20 出 application/vnd.docker.distribution.manifest.list.v2+json，较新的
+      # 出 application/vnd.oci.image.index.v1+json。ubuntu-latest 上的 buildkit 随镜像更新
+      # 而变，同一份 workflow 因此可能产出不同 media type；ACR 按 Docker v2 仓库使用，
+      # 收下 OCI index 后控制台与拉取都解析不出内容（表现为镜像"空的"）。固定成 Docker
+      # schema2 后与 ACR 的解析路径无关，也不会再随 runner 镜像漂移。
+      #
+      # 每组推送成功后回读校验（.github/scripts/verify-image.py）：registry 只校验
+      # manifest 本身，不校验它引用的 blob 是否存在，所以 buildx 报成功不等于镜像可用。
+      # 校验不过就按该组失败处理，让"推上去了但拉不到"在 CI 里直接红掉。
       - name: 构建并推送镜像
         env:
           TAGS: ${{ steps.tags.outputs.tags }}
@@ -366,12 +378,14 @@ jobs:
 
           # 由每组的调用方在 push_group 之前赋值，这里给个空默认值避免 set -u 报错
           ATTEST_ARGS=()
+          OUTPUT_ARGS=()
 
           build() {
             docker buildx build \
               --push \
               --pull \
               "${ATTEST_ARGS[@]}" \
+              "${OUTPUT_ARGS[@]}" \
               --platform linux/amd64,linux/arm64 \
               "$@" \
               --label "org.opencontainers.image.title=${IMAGE_NAME}" \
@@ -382,21 +396,55 @@ jobs:
               .
           }
 
+          # 回读该组每个 tag 在仓库里的实际状态；任一 tag 校验不过就返回非零。
+          verify_group() {
+            local label="$1"
+            local expect="$2"
+            shift 2
+            local failed=0
+            local tag
+
+            for tag in "$@"; do
+              echo "校验 ${tag}"
+              if ! python3 .github/scripts/verify-image.py "${tag}" --expect "${expect}"; then
+                failed=1
+              fi
+            done
+
+            if [ "${failed}" -ne 0 ]; then
+              echo "::error::${label} 的镜像在仓库里不可用（manifest 存在但内容缺失或格式不符）"
+              return 1
+            fi
+          }
+
           read -r -a delays <<< "${RETRY_DELAYS}"
 
-          # 单个目标组带重试地推送；标签通过 "$@" 传进来，ATTEST_ARGS 由调用方设置。
+          # 单个目标组带重试地推送并回读校验。
+          #   $1 标题，$2 期望的索引类型（docker|any），$3.. 纯 tag（不带 -t）。
+          # ATTEST_ARGS / OUTPUT_ARGS 由调用方设置。
           push_group() {
             local label="$1"
-            shift
+            local expect="$2"
+            shift 2
+            local group_tags=("$@")
+            local tag_args=()
+            local tag
+
+            for tag in "${group_tags[@]}"; do
+              tag_args+=(-t "${tag}")
+            done
 
             for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
               echo "::group::${label} 第 ${attempt}/${MAX_ATTEMPTS} 次"
               local status=0
-              build "$@" || status=$?
+              build "${tag_args[@]}" || status=$?
+              if [ "${status}" -eq 0 ]; then
+                verify_group "${label}" "${expect}" "${group_tags[@]}" || status=$?
+              fi
               echo "::endgroup::"
 
               if [ "${status}" -eq 0 ]; then
-                echo "${label} 推送成功（第 ${attempt} 次尝试）"
+                echo "${label} 推送并校验通过（第 ${attempt} 次尝试）"
                 return 0
               fi
 
@@ -406,17 +454,14 @@ jobs:
               fi
 
               local delay="${delays[$((attempt - 1))]:-60}"
-              echo "${label} 第 ${attempt} 次推送失败（退出码 ${status}），${delay} 秒后重试" >&2
+              echo "${label} 第 ${attempt} 次推送或校验失败（退出码 ${status}），${delay} 秒后重试" >&2
               sleep "${delay}"
             done
           }
 
           if [ "${#tags[@]}" -gt 0 ]; then
-            tag_args=()
-            for tag in "${tags[@]}"; do
-              tag_args+=(-t "${tag}")
-            done
             ATTEST_ARGS=()
+            OUTPUT_ARGS=()
 
             # 这一组可能只有 GHCR、只有 Docker Hub，或两者都有，标题按实际目标拼
             group_label=""
@@ -425,14 +470,12 @@ jobs:
               if [ -n "${group_label}" ]; then group_label="${group_label} / Docker Hub"; else group_label="Docker Hub"; fi
             fi
             [ -n "${group_label}" ] || group_label="镜像仓库"
-            push_group "${group_label}（保留默认 attestation）" "${tag_args[@]}"
+            push_group "${group_label}（保留默认 attestation）" any "${tags[@]}"
           fi
 
           if [ "${#aliyun_tags[@]}" -gt 0 ]; then
-            aliyun_tag_args=()
-            for tag in "${aliyun_tags[@]}"; do
-              aliyun_tag_args+=(-t "${tag}")
-            done
             ATTEST_ARGS=(--provenance=false --sbom=false)
-            push_group "阿里云 ACR（关闭 attestation）" "${aliyun_tag_args[@]}"
+            # 固定 Docker schema2，见上方注释：ACR 按 Docker v2 仓库使用，不能保证解析 OCI index
+            OUTPUT_ARGS=(--output "type=image,push=true,oci-mediatypes=false")
+            push_group "阿里云 ACR（Docker schema2，无 attestation）" docker "${aliyun_tags[@]}"
           fi

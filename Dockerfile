@@ -93,6 +93,15 @@ COPY --from=builder /build/manager /usr/bin/manager
 # auth_basic off 是必须的：Basic 和 MCP 的 Bearer 都占用 Authorization 头，一个请求
 # 只能带一个，两者同时开启会导致任何请求都过不了其中一层。/mcp 因此只保留 Bearer
 # 鉴权（设了 MCP_KEYS 或 MCP_TOKEN 才校验），Web 界面仍走 Basic Auth。
+# /chrome-mcp 也走同一条反代：它是给手机侧自动化模块取走的浏览器伪装脚本
+# （见下方 shim 说明与 README「给外部自动化模块提供浏览器路径」）。同样关掉
+# Basic Auth —— 该文件不含密钥，而取它的往往是不会带 Basic 凭据的自动化模块；
+# 真正的访问控制在网络层（是否把 3001 暴露到公网）。
+#
+# /cdp/ 是 DevTools 反向代理：Chromium 只把调试端口绑在 127.0.0.1 上（实测
+# --remote-debugging-address 在 156 上无效），容器外只能经由这里连。必须带
+# websocket upgrade 的三个头，否则 /json/version 能通而 CDP 会话建不起来。
+# 超时按 ws 长连接放宽；token 走 query，因为 CDP 的 ws 连接加不了请求头。
 RUN printf '%s\n' \
     '  location /mcp {' \
     '    auth_basic off;' \
@@ -105,32 +114,83 @@ RUN printf '%s\n' \
     '    proxy_buffering         off;' \
     '    client_max_body_size    8m;' \
     '    proxy_pass              http://127.0.0.1:10101;' \
+    '  }' \
+    '  location = /chrome-mcp {' \
+    '    auth_basic off;' \
+    '    proxy_set_header        Host $host;' \
+    '    proxy_set_header        X-Real-IP $remote_addr;' \
+    '    proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;' \
+    '    proxy_http_version      1.1;' \
+    '    proxy_pass              http://127.0.0.1:10101/chrome-mcp;' \
+    '  }' \
+    '  location /cdp {' \
+    '    auth_basic off;' \
+    '    proxy_set_header        Host $host;' \
+    '    proxy_set_header        X-Real-IP $remote_addr;' \
+    '    proxy_set_header        X-Forwarded-For $proxy_add_x_forwarded_for;' \
+    '    proxy_set_header        X-Forwarded-Host $host:$server_port;' \
+    '    proxy_set_header        X-Forwarded-Proto $scheme;' \
+    '    proxy_set_header        Upgrade $http_upgrade;' \
+    '    proxy_set_header        Connection "upgrade";' \
+    '    proxy_http_version      1.1;' \
+    '    proxy_read_timeout      3600s;' \
+    '    proxy_send_timeout      3600s;' \
+    '    proxy_buffering         off;' \
+    '    proxy_pass              http://127.0.0.1:10101;' \
     '  }' > /tmp/mcp-location.conf && \
   sed -i '/error_page 500 502 503 504/r /tmp/mcp-location.conf' /defaults/default.conf && \
   rm -f /tmp/mcp-location.conf && \
   test "$(grep -c 'location /mcp' /defaults/default.conf)" -eq 2 && \
-  test "$(grep -c 'auth_basic off;' /defaults/default.conf)" -eq 2
+  test "$(grep -c 'location = /chrome-mcp' /defaults/default.conf)" -eq 2 && \
+  test "$(grep -c 'location /cdp' /defaults/default.conf)" -eq 2 && \
+  test "$(grep -c 'auth_basic off;' /defaults/default.conf)" -eq 6
 
-# 修补基础镜像里打包的 Selkies 前端 bundle（文件名带内容哈希，随上游版本变化）。
+# 修补基础镜像里打包的 Selkies 前端（文件名带内容哈希，随上游版本变化）。
 #
+# 改的必须是 selkies-dashboard：nginx 的 root 是 /usr/share/selkies/web，但该目录在容器
+# 启动时由 init-nginx 用 `rm -Rf web && cp -a $DASHBOARD web` 重建（DASHBOARD 默认
+# selkies-dashboard），所以只有改源目录才能带进最终产物；改 web 会在启动时被覆盖掉。
+# 每处 sed 前后都做计数校验：上游改写法或改名时构建直接失败，而不是悄悄产出一个坏镜像。
+#
+# 一、解码器提示
 # 上游把解码器配置写死成 hardwareAcceleration:"prefer-software"。真机 WebCodecs 实测：
 # 带这个提示时所有配置（含 1280x720）一律 supported:false，不传该字段则全部 true。
 # 默认 encoder 是 x264enc，走分片（stripe）解码器：isConfigSupported 失败时只打一行
 # "VNC stripe decoder config not supported" 并丢掉解码器，下一帧重建再失败，屏幕始终没有
 # 画面，遮罩停在 "Waiting for stream..."。（jpeg 走主解码器，失败会进 Fi() 降档并 3 秒
-# reload。）因此把该字段整条删掉，退回实测可行的「不传」路径。sed 后用计数校验，上游改写法
-# 或改名时构建直接失败，而不是悄悄产出一个坏镜像。
+# reload。）因此把该字段整条删掉，退回实测可行的「不传」路径。
 #
-# 改的必须是 selkies-dashboard：nginx 的 root 是 /usr/share/selkies/web，但该目录在容器
-# 启动时由 init-nginx 用 `rm -Rf web && cp -a $DASHBOARD web` 重建（DASHBOARD 默认
-# selkies-dashboard），所以只有改源目录才能带进最终产物；改 web 会在启动时被覆盖掉。
+# 二、手机端禁止缩放
+# index.html 的 viewport 写死 maximum-scale=1,user-scalable=no，浏览器直接禁止捏合缩放；
+# 1920x1080 的流缩到手机屏上，内容小到看不清。改成 maximum-scale=10,user-scalable=yes。
+#
+# 三、两指手势被转成滚轮
+# _handleTouchEvent 的两指分支把 h 置 true（并调 _triggerMouseWheel 当滚动），函数结尾
+# `h&&this.element.contains(s.target)&&s.preventDefault()` 因此取消浏览器的默认手势。
+# 光改 viewport 不够：实测只改 meta 时两指 touchmove 仍被 5/5 preventDefault。给结尾加
+# `!this._isTwoFingerGesture`，两指手势不再被拦，单指点击/拖动/长按照旧由 Selkies 接管。
 RUN f="$(ls /usr/share/selkies/selkies-dashboard/assets/index-*.js)" && \
+  i=/usr/share/selkies/selkies-dashboard/index.html && \
   test "$(printf '%s\n' "$f" | wc -l)" -eq 1 && \
-  test "$(grep -o ',hardwareAcceleration:"prefer-software"' "$f" | wc -l)" -eq 2 && \
+  test "$(grep -oF ',hardwareAcceleration:"prefer-software"' "$f" | wc -l)" -eq 2 && \
   sed -i 's/,hardwareAcceleration:"prefer-software"//g' "$f" && \
-  test "$(grep -o 'prefer-software' "$f" | wc -l)" -eq 0
+  test "$(grep -oF 'prefer-software' "$f" | wc -l)" -eq 0 && \
+  test "$(grep -oF 'h&&this.element.contains(s.target)&&s.preventDefault()' "$f" | wc -l)" -eq 1 && \
+  sed -i 's/h&&this\.element\.contains(s\.target)&&s\.preventDefault()/h\&\&!this._isTwoFingerGesture\&\&this.element.contains(s.target)\&\&s.preventDefault()/' "$f" && \
+  test "$(grep -oF 'h&&!this._isTwoFingerGesture&&this.element.contains(s.target)&&s.preventDefault()' "$f" | wc -l)" -eq 1 && \
+  test "$(grep -oF 'h&&this.element.contains(s.target)&&s.preventDefault()' "$f" | wc -l)" -eq 0 && \
+  test "$(grep -oF 'maximum-scale=1,user-scalable=no' "$i" | wc -l)" -eq 1 && \
+  sed -i 's/maximum-scale=1,user-scalable=no/maximum-scale=10,user-scalable=yes/' "$i" && \
+  test "$(grep -oF 'maximum-scale=10,user-scalable=yes' "$i" | wc -l)" -eq 1 && \
+  test "$(grep -oF 'user-scalable=no' "$i" | wc -l)" -eq 0
 
 COPY /root /
+
+# 浏览器伪装脚本：外部自动化模块（如手机上的刷抖音模块）只接受一个本地浏览器
+# 可执行文件路径，而浏览器在容器里。该脚本被当作那个路径调用时不启动浏览器，只把
+# 已运行实例的 DevTools websocket 地址按 Chrome 的格式打到 stderr，调用方据此连上
+# 容器内的实例。同时经 GET /chrome-mcp 原样下载（见 src/shim.go 与 README）。
+RUN chmod 0755 /usr/local/bin/chrome-mcp && test -x /usr/local/bin/chrome-mcp
 
 EXPOSE 3000
 # 外部 MCP 直连端口（MCP_HTTP_ADDR 默认 0.0.0.0:10102）

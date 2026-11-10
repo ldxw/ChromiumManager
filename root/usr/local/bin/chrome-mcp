@@ -1,0 +1,202 @@
+#!/bin/sh
+# chrome-mcp —— 把容器里正在运行的 Chromium 伪装成一个本地浏览器可执行文件。
+#
+# 背景：抖音一类的自动化模块只接受一个「浏览器路径」（puppeteer 的
+# executablePath、某些库的 binary_location），而浏览器跑在远端容器里，本机没有。
+# 这个脚本被当作那个路径调用时，不做任何本地启动，只按 Chrome 自己的格式往
+# stderr 打一行：
+#
+#   DevTools listening on ws://<host>:<port>/cdp/<id>/devtools/browser/<uuid>?token=...
+#
+# puppeteer.launch() 就是靠这一行找到调试地址的，之后 page.goto / page.click
+# 全部作用在远端浏览器上。
+#
+# 地址来自 manager 的 CDP 反向代理（不要直接连 9222）：Chromium 只把调试端口
+# 绑在 127.0.0.1 上，映射出来的端口在容器外连不上；/cdp/... 由 manager 转发，
+# 并带着 MCP_TOKEN 鉴权。
+#
+# 环境变量：
+#   MCP_CDP_HTTP     manager 的地址，默认 http://127.0.0.1:10102
+#                    手机/局域网用 http://<宿主机>:10102
+#   MCP_CDP_PROFILE  配置 _id；留空时取唯一运行中的实例，多于一个会报错并列出候选
+#   MCP_CDP_TOKEN    MCP_TOKEN；manager 设了它时必填
+#   MCP_CDP_WS       直接给出 ws 地址，跳过 HTTP 查询（故障排查用）
+#   MCP_CDP_TIMEOUT  等待端点就绪的秒数，默认 20（puppeteer 自己的上限是 30s）
+#   MCP_CDP_VERSION  --version 时输出的版本号，默认 156.0.8078.79
+#
+# 远端无需配置：实例用 --remote-debugging-port=0 的随机端口即可，不必改启动参数。
+
+set -u
+
+CDP_HTTP="${MCP_CDP_HTTP:-http://127.0.0.1:10102}"
+CDP_PROFILE="${MCP_CDP_PROFILE:-}"
+CDP_TOKEN="${MCP_CDP_TOKEN:-}"
+CDP_WS="${MCP_CDP_WS:-}"
+WAIT="${MCP_CDP_TIMEOUT:-20}"
+VERSION="${MCP_CDP_VERSION:-156.0.8078.79}"
+
+for a in "$@"; do
+  case "$a" in
+    --version|-v|-version|--product-version)
+      printf 'Chromium %s\n' "$VERSION"
+      exit 0
+      ;;
+    --help|-h)
+      printf 'chrome-mcp: 把远端 Chromium 当作本地浏览器。\n'
+      printf '  MCP_CDP_HTTP=%s\n' "$CDP_HTTP"
+      printf '  MCP_CDP_PROFILE=%s\n' "${CDP_PROFILE:-（自动取唯一运行实例）}"
+      printf '  环境变量见 README「给外部自动化模块提供浏览器路径」\n'
+      exit 0
+      ;;
+  esac
+done
+
+HTTP_BASE="${CDP_HTTP%/}"
+# /cdp 本身（不带 _id）就是「唯一运行实例的 /json/version」，由 manager 解析；
+# 指定了配置 _id 时才拼完整路径。
+if [ -n "$CDP_PROFILE" ]; then
+  ENDPOINT="$HTTP_BASE/cdp/$CDP_PROFILE/json/version"
+else
+  ENDPOINT="$HTTP_BASE/cdp"
+fi
+
+# token 放进 query：CDP 的 websocket 连接加不了自定义请求头。
+# 只转义会破坏 URL 的字符，其余原样保留。
+if [ -n "$CDP_TOKEN" ]; then
+  Q_TOKEN=$(printf '%s' "$CDP_TOKEN" | sed 's/%/%25/g; s/ /%20/g; s/#/%23/g; s/&/%26/g; s/?/%3F/g')
+  PROBE_URL="$ENDPOINT?token=$Q_TOKEN"
+else
+  PROBE_URL="$ENDPOINT"
+fi
+
+# https 常见自签证书，这里不做校验以免模块卡在证书错误上。
+case "$HTTP_BASE" in
+  https://*) CURL_INSECURE="-k" ;;
+  *) CURL_INSECURE="" ;;
+esac
+
+# 不加 -f：4xx/5xx 的正文（manager 的报错，例如「有多个运行中的配置」）
+# 比空响应有用得多。成功与否由调用方解析 webSocketDebuggerUrl 判断。
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    curl -sS $CURL_INSECURE --max-time 3 "$1" 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    if [ -n "$CURL_INSECURE" ]; then
+      wget -q -T 3 --no-check-certificate -O - "$1" 2>/dev/null
+    else
+      wget -q -T 3 -O - "$1" 2>/dev/null
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import sys, ssl, urllib.request, urllib.error
+url = sys.argv[1]
+ctx = ssl._create_unverified_context() if url.startswith("https://") else None
+try:
+    sys.stdout.write(urllib.request.urlopen(url, timeout=3, context=ctx).read().decode())
+except urllib.error.HTTPError as e:
+    sys.stdout.write(e.read().decode())' "$1" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+# 从 /cdp/.../json/version 取 webSocketDebuggerUrl。浏览器级 uuid 在实例存活
+# 期间不变，所以只在启动时取一次。
+if [ -z "$CDP_WS" ]; then
+  i=0
+  last=""
+  while [ "$i" -lt "$WAIT" ]; do
+    body=$(fetch "$PROBE_URL") || body=""
+    if [ -n "$body" ]; then
+      CDP_WS=$(printf '%s' "$body" | tr -d '\r\n' |
+        sed -n 's/.*"webSocketDebuggerUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+      if [ -n "$CDP_WS" ]; then
+        PROBE_OK=1
+        break
+      fi
+      CDP_WS=""
+      # manager 的错误正文（例如「有多个运行中的配置」）比空响应有用得多。
+      last=$(printf '%s' "$body" | tr -d '\r\n' | cut -c1-300)
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+fi
+
+if [ -z "$CDP_WS" ]; then
+  printf 'chrome-mcp: %s 上等不到 DevTools 端点（%ss）\n' "$PROBE_URL" "$WAIT" >&2
+  if [ -n "${last:-}" ]; then
+    printf 'chrome-mcp: 服务端返回：%s\n' "$last" >&2
+  fi
+  printf 'chrome-mcp: 确认容器里已有实例在运行，且 MCP_CDP_HTTP 指向 manager 的地址\n' >&2
+  printf 'chrome-mcp: 设了 MCP_TOKEN 时还要提供 MCP_CDP_TOKEN\n' >&2
+  exit 1
+fi
+
+# 服务端一般已经按调用方地址改写好了 ws 主机；只有仍旧给回 loopback 时才替换成
+# MCP_CDP_HTTP 里的地址（连端口一起换，不能只换主机名）。
+HTTP_AUTH=$(printf '%s' "$HTTP_BASE" | sed -n 's#^[A-Za-z][A-Za-z0-9+.-]*://\([^/]*\).*#\1#p')
+WS_REST="${CDP_WS#*://}"
+WS_AUTH="${WS_REST%%/*}"
+case "$WS_REST" in
+  */*) WS_PATH="/${WS_REST#*/}" ;;
+  *) WS_PATH="/" ;;
+esac
+case "$WS_AUTH" in
+  127.0.0.1 | 127.0.0.1:* | localhost | localhost:* | '[::1]' | '[::1]':*)
+    if [ -n "$HTTP_AUTH" ]; then
+      CDP_WS="ws://${HTTP_AUTH}${WS_PATH}"
+      case "$HTTP_BASE" in
+        https://*) CDP_WS="wss://${HTTP_AUTH}${WS_PATH}" ;;
+      esac
+    fi
+    ;;
+esac
+
+printf 'DevTools listening on %s\n' "$CDP_WS" >&2
+
+# puppeteer 的 launch 只认 ws://，它用的正则固定成
+#   /^DevTools listening on (ws:\/\/.*)$/
+# 所以走 https 反代（wss://）时它能拿到这一行却解析不出端点，最后报
+# 「Timed out while waiting for the WS endpoint URL to appear in stdout」。
+# 与其让人对着超时猜，这里直接把原因说清楚：改用 manager 的明文端口。
+case "$CDP_WS" in
+  wss://*)
+    printf 'chrome-mcp: 注意：拿到的是 wss:// 地址。puppeteer.launch 只解析 ws://，' >&2
+    printf '会一直等到超时。请把 MCP_CDP_HTTP 换成 manager 的明文端口（默认 10102）。\n' >&2
+    ;;
+esac
+
+# 脚本本身只是让调用方的进程活着；真正的连接由调用方直接连远端。
+# 调用方有时只发 Browser.close 而不回收子进程，所以自己盯着远端：连续几次
+# 探测不到就退出，避免实例关掉后留下一堆孤儿。
+trap 'exit 0' TERM INT HUP
+
+# 只在「启动时确实通过 HTTP 探到过」的情况下做存活检查：直接给 MCP_CDP_WS 时
+# 未必能访问 HTTP 端点，那时宁可不判死。
+#
+# 判据必须是「响应里还有 webSocketDebuggerUrl」，不能只看 curl 的退出码：
+# 实例关掉后 /cdp 会回 503 + 一段说明文字，curl 照样成功，只看退出码会永远
+# 认为它还活着，留下孤儿进程。
+if [ "${PROBE_OK:-0}" = "1" ]; then
+  misses=0
+  while :; do
+    sleep 5
+    body=$(fetch "$PROBE_URL") || body=""
+    case "$body" in
+      *'"webSocketDebuggerUrl"'*) misses=0 ;;
+      *)
+        misses=$((misses + 1))
+        if [ "$misses" -ge 3 ]; then
+          printf 'chrome-mcp: 远端 DevTools 已消失（%s），退出\n' "$PROBE_URL" >&2
+          exit 0
+        fi
+        ;;
+    esac
+  done
+fi
+
+while :; do
+  sleep 5
+done

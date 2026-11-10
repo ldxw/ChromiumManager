@@ -275,6 +275,15 @@ func startServer() {
 	mcpSrv := newMCPServer()
 	mux.Handle("/mcp", mcpHTTPHandler(mcpSrv))
 
+	// 浏览器伪装脚本的下载入口，供手机/Aurabot 侧的自动化模块取走当「浏览器路径」。
+	mux.HandleFunc("GET /chrome-mcp", serveChromeMCPShim)
+
+	// DevTools 反向代理：Chromium 只把调试端口绑在 127.0.0.1 上，
+	// --remote-debugging-address 在 156 上不生效（实测 headless/headful 都只监听
+	// loopback），容器外拿不到。这里把 /cdp/<配置 _id>/... 转发到该实例的随机端口。
+	// 同样挂到外部监听端口。
+	registerCDPProxy(mux)
+
 	// Static files
 	fsSub, _ := fs.Sub(webFS, "web/dist")
 	mux.Handle("/", http.FileServer(http.FS(fsSub)))

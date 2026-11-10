@@ -62,7 +62,7 @@
 ```yaml
 services:
   chromium-manager:
-    image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
+    image: ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
     container_name: chromium-manager
     network_mode: bridge
     shm_size: 1gb
@@ -131,7 +131,7 @@ docker run -d \
   -p 10102:10102 \
   -v ./config:/config \
   --restart unless-stopped \
-  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
 ```
 
 上面 `MCP_TOKEN` / `MCP_KEYS` / `MCP_KEYS_FILE` 留空即不启用鉴权与 key 绑定，
@@ -139,7 +139,7 @@ docker run -d \
 例如 `-e MCP_KEYS='{"key1":"窗口1","key2":"项目A/窗口1","key3":"项目B/窗口1"}'`，
 value 支持 `配置名` 与 `分组名/配置名` 两种写法，详见「多 key 绑定」。
 
-镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp-keys`，上例中的
+镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp`，上例中的
 `156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
 
 `-e PUID=$(id -u)` 取的是执行这条命令的用户，适合在宿主机上直接跑；在别的机器上准备
@@ -222,6 +222,152 @@ false 时只 `console.error` 一行 `VNC stripe decoder config not supported for
 两种改法都不需要使用者操作。若手机上仍觉得字小，可以把 `SELKIES_MANUAL_*` 一起调高
 （如 `2560`×`1440`），前提是目标手机的解码器能吃下。
 
+#### 手机端捏合缩放
+
+1920×1080 的流等比缩到手机竖屏上只有 390px 宽，内容小到看不清，需要捏合放大。上游有
+两处把这个手势堵死，镜像里都做了调整，同样不需要使用者配置：
+
+**一、viewport 禁止缩放。** `selkies-dashboard/index.html` 写死：
+
+```html
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+```
+
+`maximum-scale=1` 会把页面缩放上限钳在 1 倍。镜像里改成 `maximum-scale=10,user-scalable=yes`。
+用 `Emulation.setPageScaleFactor` 请求 3 倍实测：未改的页面停在 `visualViewport.scale = 1`，
+改后到 `3`。
+
+**二、两指手势被当成滚轮吞掉。** `_handleTouchEvent` 在两指时置 `h = !0`，函数结尾
+`h&&this.element.contains(s.target)&&s.preventDefault()` 于是取消浏览器默认手势，两指
+换成发滚轮消息（`_triggerMouseWheel`）。只改 viewport 是无效的：实测两指 `touchmove`
+仍 5/5 被 `preventDefault`。镜像给结尾加上 `!this._isTwoFingerGesture`，两指不再被拦。
+
+单指操作不受影响，仍由 Selkies 接管（点击、拖动、长按、1→2→1 指的过渡都实测 `prevented`
+不变）。
+
+沙箱实测（iPhone UA、390×844、DPR 3，CDP 合成触摸；表中为两指 `touchmove` 被
+`preventDefault` 的条数）：
+
+| 状态 | 两指 touchmove | 单指 touchmove | 请求 pageScale 3 |
+| --- | --- | --- | --- |
+| 上游原样 | 5/5 被拦 | 4/4 被拦 | 停在 1 |
+| 只改 viewport | 5/5 被拦 | 4/4 被拦 | 到 3 |
+| 两处都改 | 0/5 被拦 | 4/4 被拦 | 到 3 |
+
+CDP 合成的触摸事件不进浏览器 UI 手势流，所以 `visualViewport.scale` 不会因合成捏合而变；
+上表最后一列用 `Emulation.setPageScaleFactor` 测的是 viewport 钳制本身。真机上两指手势
+在浏览器层就能生效。
+
+#### 给外部自动化模块提供浏览器路径
+
+有些自动化模块（手机上的刷抖音一类）只接受一个「浏览器路径」，内部拿它当
+puppeteer 的 `executablePath` 用：自己 spawn 那个文件，然后从它的 stderr 里等
+`DevTools listening on ws://...` 这一行来接管浏览器。浏览器跑在容器里，本机没有这个
+文件，于是镜像里放了一个同名的伪装脚本 `/usr/local/bin/chrome-mcp`。
+
+**它不启动浏览器，只做地址转交。** 被调用时向 manager 的 `/cdp` 查地址，把拿到的
+websocket 地址按 Chrome 的原格式打到 stderr，然后守着不退（调用方通常以「子进程退出
+= 浏览器崩溃」处理）：
+
+```bash
+$ MCP_CDP_HTTP=http://192.168.1.10:10102 /usr/local/bin/chrome-mcp --headless=new
+DevTools listening on ws://192.168.1.10:10102/cdp/UkLWZg9D/devtools/browser/6f3c...?token=...
+```
+
+`--version` 会回一行 `Chromium 156.0.8078.79`，部分模块启动前会探测它。
+
+**必须用明文端口。** puppeteer 解析这一行用的是固定正则
+`/^DevTools listening on (ws:\/\/.*)$/`，只认 `ws://`。`MCP_CDP_HTTP` 填 `https://`
+时 manager 会把地址改写成 `wss://`，puppeteer 拿到也匹配不上，最后报
+`Timed out after 25000 ms while waiting for the WS endpoint URL to appear in stdout`。
+所以镜像的 3001（HTTPS）那条**不能**喂给它：`/chrome-mcp` 从 3001 下载没问题，但
+`MCP_CDP_HTTP` 要指回明文端口——10102，或本机映射出来的 3000。脚本发现拿到 `wss://`
+会额外打一行提示，不会静默等到超时。
+
+**为什么不是直接连 9222。** Chromium 的 DevTools 只监听 `127.0.0.1`，实测在 156 上
+传 `--remote-debugging-address=0.0.0.0` 不起作用——headless 与 headful 下 `ss -ltn`
+都仍是 `127.0.0.1:PORT`，从容器网卡地址连不上。所以地址要由 manager 转出来：
+后端把 `/cdp/<配置 _id>/...` 反代到该实例的随机调试端口，`/json/version` 响应里的
+`webSocketDebuggerUrl` 也被改写成这个对外可达的路径。好处是**不用给实例配任何启动
+参数**（默认的 `--remote-debugging-port=0` 随机端口即可）、不用占宿主机端口、也不用
+为多开分配端口。
+
+**取这个文件。** 手机侧拿不到容器文件系统，走 HTTP 下载（3000 与 3001 都有，`/mcp` 的
+同一条 nginx 反代之外单独挂了这个路由）：
+
+```bash
+curl -fsS http://<宿主机>:3000/chrome-mcp -o chrome-mcp && chmod +x chrome-mcp
+```
+
+也可以从 10102 外部 MCP 端口取：
+`curl -fsS http://<宿主机>:10102/chrome-mcp -o chrome-mcp && chmod +x chrome-mcp`。
+容器里则直接 `docker cp <容器名>:/usr/local/bin/chrome-mcp .`，同样需要 `chmod +x`。
+
+**`chmod +x` 不能省。** HTTP 响应不携带权限位，`curl -o` 建出来的文件权限由 umask 决定
+（通常是 `0644` / `0664`），没有执行位。模块拿这个路径去 `spawn` 时内核直接返回
+`EACCES`，表现为「浏览器起不来」而不是脚本报错。实测未 `chmod` 时
+`./chrome-mcp --version` 是 `Permission denied`（退出码 126），加完立刻正常。
+
+Android 上另有一个坑：`/sdcard`（`/storage/emulated/0`）是 FUSE 挂载且带 `noexec`，
+放在那里的文件即使权限位看着是 `0755` 也执行不了（`chmod` 可能直接报
+`Operation not permitted`，也可能改了但挂载选项仍拦着）。要放到应用私有目录
+（如 Termux 的 `$PREFIX/bin`，或 Aurabot 数据目录下能执行的路径）。
+
+**配置伪装脚本。** 建议在模块里把这几项一起设上：
+
+| 环境变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `MCP_CDP_HTTP` | `http://127.0.0.1:10102` | manager 的地址。脚本据此查 `/cdp`。手机/局域网填 `http://<宿主机>:10102` |
+| `MCP_CDP_PROFILE` | 空 | 配置 `_id`。留空时取唯一运行中的实例；同时开着多个会报错并列出候选 `_id`。容器设了 `MCP_KEYS` 时留空即可，会自动落到这个 key 绑定的配置 |
+| `MCP_CDP_TOKEN` | 空 | manager 的凭据：设了 `MCP_KEYS` 就填分配给你的那个 key，否则填 `MCP_TOKEN`。必填，脚本会把它放进 URL 的 `?token=` |
+| `MCP_CDP_WS` | 空 | 直接给出 ws 地址时跳过 HTTP 查询，故障排查用 |
+| `MCP_CDP_TIMEOUT` | `20` | 等待端点就绪的秒数。puppeteer 自己 30s 就放弃，别超过它 |
+| `MCP_CDP_VERSION` | `156.0.8078.79` | `--version` 的返回值 |
+
+手机上通常写成（单 key）：
+
+```
+MCP_CDP_HTTP=http://<宿主机>:10102
+MCP_CDP_TOKEN=<和容器里的 MCP_TOKEN 一致>
+```
+
+容器用 `MCP_KEYS` 时，每个模块填自己那个 key，`MCP_CDP_PROFILE` 不用填：
+
+```
+MCP_CDP_HTTP=http://<宿主机>:10102
+MCP_CDP_TOKEN=<分配给你的 key，如 key1>
+```
+
+**只要开一个实例就不用填 `MCP_CDP_PROFILE`。** `/cdp` 这条路由在恰好一个实例运行时
+直接回它的 `/json/version`；0 个返回 503，多个返回 409 并把各自的 `_id` 与名字列出来。
+要固定连某个配置时填 `MCP_CDP_PROFILE=<_id>`，它就只走 `/cdp/<_id>/json/version`。
+容器设了 `MCP_KEYS` 时这条判断不适用：`/cdp` 直接落到该 key 自己的配置，不受「同时跑着
+几个实例」影响，填别人的 `_id` 会得到 403。
+
+**安全边界。** 这条路径和 Web 界面/MCP 共用同一套凭据（`MCP_KEYS` 优先，否则
+`MCP_TOKEN`）：设了就要求 Bearer 或 `?token=`，没设则任何能连到该端口的人都能
+**完全控制**运行中的实例——读改 Cookie、在已登录站点上执行任意 JS、导出会话。浏览器级
+的 CDP 权限和「登录了账号的那台浏览器」完全等价，所以：
+
+- 公网暴露时务必设 `MCP_TOKEN` 或 `MCP_KEYS`，并优先只映射 `10102` 这一条（或经 3001 的 HTTPS）。
+- 只在本机用时把 `MCP_HTTP_ADDR` 设成 `127.0.0.1:10102`，手机侧先建隧道：
+
+  ```bash
+  ssh -N -L 10102:127.0.0.1:10102 <宿主机>
+  ```
+
+  手机上把 `MCP_CDP_HTTP` 指向 `http://127.0.0.1:10102` 即可。
+- 不要把凭据留给默认空值后又把端口开到公网；token 会出现在 URL 里，
+  可能被日志、历史记录记下，属可控但需知晓的风险。
+
+**模块不支持设置环境变量时**，直接改下载到的文件里的默认值（单 key 写成你的
+`MCP_TOKEN`，多 key 写成分配给你的那个 key）：
+
+```bash
+sed -i 's|http://127.0.0.1:10102|http://192.168.1.10:10102|' chrome-mcp
+sed -i 's|CDP_TOKEN="${MCP_CDP_TOKEN:-}"|CDP_TOKEN="你的 MCP_TOKEN"|' chrome-mcp
+```
+
 #### PUID / PGID 只能设一次
 
 `PUID` / `PGID` 决定容器内 `abc` 用户的 UID / GID，也是挂载的 `./config` 的属主。基础镜像
@@ -285,20 +431,29 @@ Docker Hub，构建由 `.github/workflows/docker-image.yml` 完成：
 - `push_ghcr` **默认勾选**，取消后本次完全不碰 GHCR，可以只推阿里云或 Docker Hub。
   GHCR 鉴权用仓库自带的 `GITHUB_TOKEN`，不需要额外 secret。
 - 勾选 `push_aliyun` 后推送一份到
-  `<ALIYUN_REGISTRY>/<ALIYUN_NAMESPACE>/chromium-manager:<版本号>-mcp-keys`，
+  `<ALIYUN_REGISTRY>/<ALIYUN_NAMESPACE>/chromium-manager:<版本号>-mcp`，
   需要在仓库 Secrets 里配置 `ALIYUN_REGISTRY`、`ALIYUN_NAMESPACE`、
   `ALIYUN_USERNAME`、`ALIYUN_PASSWORD`；缺任意一个会在构建前直接失败。
 - 勾选 `push_dockerhub` 后推送一份到
-  `<DOCKERHUB_USERNAME>/chromium-manager:<版本号>-mcp-keys`，需要在仓库 Secrets 里配置
+  `<DOCKERHUB_USERNAME>/chromium-manager:<版本号>-mcp`，需要在仓库 Secrets 里配置
   `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`；缺任意一个会在构建前直接失败。
 - 三个开关可以任意组合，至少勾选一个；全不勾选会在解析参数阶段直接失败。
-- 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp-keys` 后缀。
+- 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp` 后缀。
 - 构建失败会自动重试最多 3 次，用于绕过拉取基础镜像时的偶发 429。
 - GHCR 与 Docker Hub 保留 buildx 默认的 provenance attestation。勾选 `push_aliyun` 时，
-  阿里云那份会**单独再推一次**并关闭 provenance 与 SBOM，因为阿里云 ACR 不认
-  `application/vnd.oci.empty.v1+json` 这个 attestation manifest 类型，会拒绝整次推送。
+  阿里云那份会**单独再推一次**，关闭 provenance 与 SBOM，并固定输出 Docker schema2
+  （`--output type=image,oci-mediatypes=false`）：
+  - 阿里云 ACR 不认 `application/vnd.oci.empty.v1+json` 这个 attestation manifest 类型，
+    会拒绝整次推送；
+  - 关掉 attestation 后 buildx 仍可能输出 OCI image index，而 ACR 按 Docker v2 仓库使用，
+    收下后控制台与拉取都解析不出内容（表现为镜像“空的”）。固定 schema2 后不再受
+    runner 上 buildkit 版本的影响。
   两次推送复用同一个 buildkit 层缓存，第二次只重新组 manifest 并上传，不重复编译。
   阿里云那份的 manifest list 因此只有 amd64 / arm64 两条真实镜像，无 attestation。
+- 每组推送成功后都会**回读校验**（`.github/scripts/verify-image.py`）：确认 tag 指向多架构
+  索引、平台恰为 `linux/amd64` / `linux/arm64`，并逐个确认子 manifest 引用的 config 与
+  全部 layer blob 在仓库里真的存在。registry 只校验 manifest 本身，不校验它引用的 blob，
+  所以 buildx 报成功不等于镜像可用；校验不过按该组失败处理，CI 会直接红掉。
 
 ### 通过以下网址访问应用
 
@@ -368,8 +523,8 @@ curl -k -X POST https://<宿主机>:3001/mcp -H 'Content-Type: application/json'
 
 ### 外部直连端口
 
-除 nginx 反代之外，程序还会另起一个独立的 MCP 监听，默认 `0.0.0.0:10102`，只挂 `/mcp`
-和 `/healthz` 两个路由，不暴露管理界面，也不经过 Basic Auth：
+除 nginx 反代之外，程序还会另起一个独立的 MCP 监听，默认 `0.0.0.0:10102`，挂 `/mcp`、
+`/healthz`、`/chrome-mcp`、`/cdp` 四条路由，不暴露管理界面，也不经过 Basic Auth：
 
 ```bash
 docker run ... -p 10102:10102 ...
@@ -378,11 +533,39 @@ curl -X POST http://<宿主机>:10102/mcp -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <你的 MCP_TOKEN>' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 
 curl http://<宿主机>:10102/healthz   # 返回 ok，可用于探活
+curl -fsS http://<宿主机>:10102/chrome-mcp -o chrome-mcp && chmod +x chrome-mcp
 ```
 
 地址由 `MCP_HTTP_ADDR` 控制：改成 `127.0.0.1:10102` 可退回仅本机，设为 `off` 完全关闭。
 鉴权与 nginx 反代共用同一套：设了 `MCP_KEYS` 时按 key 查表，否则读 `MCP_TOKEN`，两个都为空
 时不校验。要把端点交给外部使用方，见「多 key 绑定」。
+
+### CDP 反向代理
+
+实例的 DevTools 端口只绑 `127.0.0.1`（`--remote-debugging-address` 在 156 上无效），
+容器外拿不到。manager 因此在 `/cdp` 下做一层反代，把各实例的随机端口转出来：
+
+| 路径 | 作用 |
+| --- | --- |
+| `/cdp` | 恰好一个实例在跑时回它的 `/json/version`；0 个返回 503，多个返回 409 并列出候选 `_id` |
+| `/cdp/<配置 _id>/json/version` | 该实例的浏览器信息，`webSocketDebuggerUrl` 已改写成本代理地址 |
+| `/cdp/<配置 _id>/json/list` | 该实例的 target 列表，同样改写 |
+| `/cdp/<配置 _id>/devtools/...` | CDP 的 websocket 通道，可建页面会话 |
+
+```bash
+TK=<你的 MCP_TOKEN>
+curl -sS "http://<宿主机>:10102/cdp?token=$TK"          # 唯一实例的 /json/version
+curl -sS "http://<宿主机>:10102/cdp/<_id>/json/list?token=$TK"
+```
+
+鉴权和 `/mcp` 一样（`MCP_KEYS` 优先，否则 `MCP_TOKEN`），但**额外接受 `?token=`**：
+puppeteer 之类建立 CDP 连接时没法加自定义请求头，凭据只能放进 URL。返回的
+`webSocketDebuggerUrl` 已经带上同一个 token，客户端拿到直接连即可。经 nginx（3000/3001）
+访问时同样可用，那两条 `location /cdp` 都关了 Basic Auth 并放行了 websocket 升级。
+
+设了 `MCP_KEYS` 时 `/cdp` 也按绑定隔离：`/cdp` 直接落到该 key 自己的配置，不必填 `_id`；
+显式填别人的 `_id` 返回 403。所以每个使用方用自己那个 key 配 `MCP_CDP_TOKEN` 即可，
+`MCP_CDP_PROFILE` 可以留空。详见「多 key 绑定」。
 
 ### 客户端配置
 
@@ -439,7 +622,7 @@ docker run -d --name chromium-manager \
   -e MCP_KEYS='{"key1":"窗口1","key2":"窗口2"}' \
   -e MCP_GROUP_NAME=mcp \
   -p 10102:10102 \
-  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
 ```
 
 上面的 value 只有配置名，会落到 `MCP_GROUP_NAME`（默认 `mcp`）这一个分组里。要让不同的使用方
@@ -488,6 +671,7 @@ docker run -d --name chromium-manager \
 | `add_profile` / `update_profile` / 删除类工具 | 不注册，`tools/list` 看不到，调用返回 unknown tool |
 | `screenshot` | 忽略 `path`，直接返回 MCP `image` 内容（PNG base64），不写文件 |
 | `navigate` | 只允许 `http://` 与 `https://`，`file://` / `chrome://` / `data:` / `javascript:` 一律拒绝 |
+| `/cdp` | 自动落到自己那个配置；带别人的 `_id` 返回 403 |
 
 `file://` 之所以必须堵掉：容器里 `/config/data/data.db` 是整份 SQLite 库，`file://` 加 `read_page`
 就能把所有配置的 cookie 与代理凭据读出来。
@@ -500,6 +684,33 @@ docker run -d --name chromium-manager \
 两个 key 绑定同一个「分组 + 配置」、key 为空、分组名或配置名为空、配置名里出现第二个 `/`，
 都会在启动时打印具体原因并让进程退出，不带着半套绑定对外服务。stdin 传输（`--mcp-stdio`）
 不读 `MCP_KEYS`，行为与以前一样。
+
+#### 多 key 与浏览器路径脚本
+
+`MCP_KEYS` 和「给外部自动化模块提供浏览器路径」是配套的：把 key 发给不同使用方，各自的
+`MCP_CDP_TOKEN` 填自己那个 key、`MCP_CDP_PROFILE` 留空，脚本查 `/cdp` 时就会落到自己绑定
+的配置，不需要知道任何 `_id`：
+
+```bash
+# 容器
+-e MCP_KEYS='{"key1":"项目A/窗口1","key2":"项目A/窗口2"}'
+
+# 使用方 1 的模块环境变量
+MCP_CDP_HTTP=http://<宿主机>:10102
+MCP_CDP_TOKEN=key1
+
+# 使用方 2
+MCP_CDP_HTTP=http://<宿主机>:10102
+MCP_CDP_TOKEN=key2
+```
+
+`/chrome-mcp` 这个下载路由本身不校验（脚本里没有密钥），任何能连到端口的人都能取到；
+真正的访问控制是靠 `/cdp` 那一步的 key 校验，取到脚本但没有 key 的人连不上任何实例。
+所以把 10102 开到公网时，`/chrome-mcp` 不构成额外的暴露面，但 `MCP_KEYS` / `MCP_TOKEN`
+必须设。
+
+**多 key 按配置隔离，不按标签页隔离。** 一个 key 对应一个配置（也就是一个浏览器实例），
+实例内部只绑定第一个页面；同一个实例里开多个标签页要靠 CDP 侧自己 `newPage()`，与 key 无关。
 
 #### Chromium 沙箱
 
@@ -520,7 +731,7 @@ seccomp 并设 `CHROME_SANDBOX=1`，此时不加 `--no-sandbox`，那条提示�
 docker run -d --name chromium-manager \
   --security-opt seccomp=unconfined \
   -e CHROME_SANDBOX=1 \
-  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-keys
+  ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
 ```
 
 注意 `seccomp=unconfined` 会让整个容器失去 seccomp 过滤，不只是 Chromium。
@@ -528,7 +739,9 @@ docker run -d --name chromium-manager \
 这条提示只是 `--no-sandbox` 的警告文案，可以用 `--test-type` 把它藏掉，但沙箱仍然是关着的，
 镜像不做这种遮盖。
 
-这几个变量都在进程或浏览器启动时读取，改完按「环境变量」一节的说明重建容器。
+镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空）、`MCP_HTTP_ADDR=0.0.0.0:10102`、
+`CHROME_SANDBOX=auto`，`docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在
+进程或浏览器启动时读取，MCP 相关的改了要重启容器才生效。
 
 ### 工具列表
 
