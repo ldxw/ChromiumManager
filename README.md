@@ -78,6 +78,7 @@ services:
       - MCP_ENABLE_DESTRUCTIVE=0
       # - MCP_TOKEN=换成你自己的随机串
       # - MCP_HTTP_ADDR=0.0.0.0:10102
+      # - MCP_AUTOLAUNCH=1
       # Chromium 沙箱，auto 为默认行为；改成 1 还需配合 seccomp 放开
       # - CHROME_SANDBOX=auto
     ports:
@@ -119,6 +120,7 @@ docker run -d \
   -e CUSTOM_USER= \
   -e PASSWORD= \
   -e MCP_ENABLE_DESTRUCTIVE=0 \
+  -e MCP_AUTOLAUNCH=0 \
   -p 3001:3001 \
   -p 10102:10102 \
   -v ./config:/config \
@@ -488,10 +490,26 @@ Streamable HTTP（先正常运行程序）：
 | `MCP_ENABLE_DESTRUCTIVE` | 设为 `1` 才注册删除类工具（`delete_profile` / `delete_proxy` / `delete_group` / `stop_all_profiles`） |
 | `MCP_TOKEN` | 仅 HTTP 传输生效；设置后要求 `Authorization: Bearer <token>`，未设置不校验。反代与外部端口都在容器外可触达，建议始终设置 |
 | `MCP_HTTP_ADDR` | 外部直连监听地址，默认 `0.0.0.0:10102`；设为 `127.0.0.1:10102` 仅本机可用，设为 `off` 关闭 |
+| `MCP_AUTOLAUNCH` | 设为 `1` 时容器启动后自动 launch 数据库里已存在的每个配置。默认关闭，客户端仍按需调 `launch_profile` |
 | `CHROME_SANDBOX` | 控制 Chromium 沙箱，见下方说明，默认 `auto` |
 
 需要 HTTP 传输鉴权时，在 `docker run` 里再加 `-e MCP_TOKEN=<随机串>`（compose 中放开被注释的那行），
 客户端请求必须带 `Authorization: Bearer <随机串>`，否则返回 401。
+
+#### 启动时自动 launch 配置
+
+配置本身只是数据库里的一行记录，创建它（`add_profile`、Web 界面新建）不会启动浏览器——
+`runningProfiles` 是纯内存表，进程重启后为空，也没有任何恢复逻辑。客户端要操作浏览器，
+必须先调一次 `launch_profile`。
+
+设 `MCP_AUTOLAUNCH=1` 后这一层前置步骤可以省掉：容器启动、HTTP 服务就绪之后，manager 在后台
+按分组与排序逐个 `launch` 数据库里已有的配置，客户端连上即可直接 `navigate`。
+
+- 默认关闭（镜像里是 `0`），行为与不设该变量完全一致。
+- 串行启动，每个之间间隔 1 秒，避免多个 Chromium 同时抢 CPU 与共享内存。
+- 单个配置启动失败只打一条日志，不影响后面的配置和进程本身。
+- 只启动启动那一刻已存在的配置；运行期新加的配置仍需自行 `launch_profile`。
+- 配置越多，启动耗时与常驻内存越大——这是它默认关闭的原因。
 
 #### Chromium 沙箱
 
@@ -521,8 +539,8 @@ docker run -d --name chromium-manager \
 镜像不做这种遮盖。
 
 镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=`（空）、`MCP_HTTP_ADDR=0.0.0.0:10102`、
-`CHROME_SANDBOX=auto`，`docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在
-进程或浏览器启动时读取，MCP 相关的改了要重启容器才生效。
+`MCP_AUTOLAUNCH=0`、`CHROME_SANDBOX=auto`，`docker run -e` 或 compose 的 `environment`
+会覆盖它们。这几个变量都在进程或浏览器启动时读取，MCP 相关的改了要重启容器才生效。
 
 ### 工具列表
 
@@ -533,8 +551,8 @@ docker run -d --name chromium-manager \
 - 浏览器：`navigate`、`read_page`、`click`、`fill`、`screenshot`、`eval_js`
 - 破坏性（需开启）：`delete_profile`、`delete_proxy`、`delete_group`、`stop_all_profiles`
 
-浏览器类工具要求目标配置已 `launch_profile`，内部通过 CDP 连接该配置的调试端口，
-`launch` 后约 1–3 秒端口就绪。`screenshot` 未指定 `path` 时写入 `<DATA_DIR>/screenshots/`，
+浏览器类工具要求目标配置已 `launch_profile`（设了 `MCP_AUTOLAUNCH=1` 时容器启动阶段就已
+launch，可跳过这一步），内部通过 CDP 连接该配置的调试端口，`launch` 后约 1–3 秒端口就绪。`screenshot` 未指定 `path` 时写入 `<DATA_DIR>/screenshots/`，
 返回图片绝对路径，客户端可直接读取。
 
 ---

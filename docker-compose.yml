@@ -45,6 +45,9 @@ services:
       # - MCP_TOKEN=换成你自己的随机串
       # 外部直连监听地址，设为 127.0.0.1:10102 仅本机，设为 off 关闭。
       # - MCP_HTTP_ADDR=0.0.0.0:10102
+      # 设为 1 时容器启动后自动 launch 数据库里已存在的每个配置，
+      # 客户端连上即可直接 navigate，不必先调 launch_profile。默认 0。
+      # - MCP_AUTOLAUNCH=1
 
       # ---------- Chromium 沙箱 ----------
       # auto 按容器 seccomp 状态判断；1 强制启用（容器需 seccomp=unconfined）；0 强制关闭。

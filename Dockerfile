@@ -48,6 +48,9 @@ ENV MCP_ENABLE_DESTRUCTIVE=0
 ENV MCP_TOKEN=
 # 外部 MCP 监听地址，容器外可直接连；设为 off 关闭
 ENV MCP_HTTP_ADDR=0.0.0.0:10102
+# 设为 1 时容器启动后自动 launch 数据库里已存在的每个配置，客户端不必先调
+# launch_profile。单个配置启动失败只记日志，不影响其他配置与容器本身。
+ENV MCP_AUTOLAUNCH=0
 # Chromium 沙箱：auto 按容器 seccomp 状态判断，1 强制启用，0 强制关闭。
 # 真正启用还需要 --security-opt seccomp=unconfined，见 README。
 ENV CHROME_SANDBOX=auto
