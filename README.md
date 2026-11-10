@@ -126,8 +126,19 @@ docker run -d \
   ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp
 ```
 
-镜像每个版本只有一个标签，形式为 `<Chromium 版本号>-mcp`，上例中的
-`156.0.8078.79-1` 即二进制来源的 Release 版本。不提供 `latest`。
+镜像不带 `latest`，标签形式为 `<Chromium 版本号>-mcp`，上例中的 `156.0.8078.79-1`
+即二进制来源的 Release 版本。
+
+每次构建会同时打两个标签：
+
+```
+ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp                 # 固定标签，长期引用这个
+ghcr.io/ldxw/chromium-manager:156.0.8078.79-1-mcp-20261110-1542   # 构建时间，UTC+8
+```
+
+时间标签的格式是 `<年><月><日>-<时><分>`，北京时间（UTC+8）、24 小时制、精确到分钟，
+同一版本反复构建时用来区分具体是哪一次产物。两个标签指向同一份 manifest list，拉哪个都
+是一样的镜像；同一分钟内重跑会落到同一个时间标签（后者覆盖前者）。
 
 `-e PUID=$(id -u)` 取的是执行这条命令的用户，适合在宿主机上直接跑；在别的机器上准备
 compose 文件时，换成目标宿主机 `id -u` / `id -g` 的实际数字。
@@ -320,6 +331,10 @@ Docker Hub，构建由 `.github/workflows/docker-image.yml` 完成：
   `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`；缺任意一个会在构建前直接失败。
 - 三个开关可以任意组合，至少勾选一个；全不勾选会在解析参数阶段直接失败。
 - 构建 `linux/amd64` 与 `linux/arm64` 两个架构，标签固定带 `-mcp` 后缀。
+- 每次构建同时推两个标签：固定的 `<版本号>-mcp` 与带 UTC+8 构建时间的
+  `<版本号>-mcp-<YYYYMMDD>-<HHMM>`。两个标签共享同一个 manifest list，
+  多打一个标签不额外增加构建或上传成本；时间按 `date -u -d '+8 hours' +%Y%m%d-%H%M` 取，
+  不依赖 runner 上的 tzdata（`TZ=Asia/Shanghai` 在缺 tzdata 时会静默退回 UTC）。
 - 构建失败会自动重试最多 3 次，用于绕过拉取基础镜像时的偶发 429。
 - GHCR 与 Docker Hub 保留 buildx 默认的 provenance attestation。勾选 `push_aliyun` 时，
   阿里云那份会**单独再推一次**，关闭 provenance 与 SBOM，并固定输出 Docker schema2
