@@ -330,6 +330,55 @@ func initMCPKeys() error {
 	return nil
 }
 
+// mcpAutolaunchEnabled 与 MCP_ENABLE_DESTRUCTIVE 同样只认 "1"，其余取值一律当关闭。
+func mcpAutolaunchEnabled() bool {
+	return os.Getenv("MCP_AUTOLAUNCH") == "1"
+}
+
+// startMCPAutolaunch 在 MCP_KEYS 建好绑定之后决定要不要自动拉起浏览器。
+//
+// 绑定配置只写进库，runningProfiles 是纯内存的，容器重启后一律为空，调用方必须先发
+// 一次 launch_profile 才能用浏览器工具。开了 MCP_AUTOLAUNCH=1 就把这一步挪到启动阶段，
+// 客户端连上即可直接 navigate。放在 goroutine 里，以免拖慢 HTTP 监听。
+func startMCPAutolaunch() {
+	if !mcpAutolaunchEnabled() {
+		return
+	}
+	if !mcpKeys.enabled() {
+		log.Printf("[MCP] WARNING: 设置了 MCP_AUTOLAUNCH=1 但没有 MCP_KEYS，" +
+			"没有可自动启动的配置（单 token 模式仍用 launch_profile）")
+		return
+	}
+	go autolaunchBindings()
+}
+
+// autolaunchBindings 逐个启动绑定配置。单个配置失败只记日志：一个配置起不来
+// 不该拖垮整个容器，其余配置照常可用。
+func autolaunchBindings() {
+	bindings := make([]*mcpBinding, 0, len(mcpKeys.bindings))
+	for _, b := range mcpKeys.bindings {
+		bindings = append(bindings, b)
+	}
+	// map 遍历顺序随机，排一下让多次启动的日志顺序稳定。
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].String() < bindings[j].String() })
+
+	log.Printf("[MCP] MCP_AUTOLAUNCH=1，自动启动 %d 个绑定配置", len(bindings))
+	for i, b := range bindings {
+		if i > 0 {
+			// 同时拉起多个 Chromium 会一起抢 CPU 与磁盘，隔一秒让上一个先稳住。
+			time.Sleep(time.Second)
+		}
+		if isRunning(b.profileID) {
+			continue
+		}
+		if err := launchProfileByID(b.profileID); err != nil {
+			log.Printf("[MCP] 自动启动配置「%s」失败：%v", b.String(), err)
+			continue
+		}
+		log.Printf("[MCP] 已自动启动配置「%s」", b.String())
+	}
+}
+
 // readMCPKeysConfig 读取 MCP_KEYS / MCP_KEYS_FILE，defaultGroup 用于补齐省写分组的条目。
 func readMCPKeysConfig(defaultGroup string) (map[string]mcpTarget, string, error) {
 	if v := strings.TrimSpace(os.Getenv("MCP_KEYS")); v != "" {

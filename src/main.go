@@ -301,6 +301,9 @@ func startServer() {
 
 	// 外部直连端口，供容器外的 AI 客户端使用。
 	startMCPExternalServer(mcpSrv)
+
+	// 放在监听之后：自动启动的 Chromium 需要 manager 已经能用。开关关闭时直接返回。
+	startMCPAutolaunch()
 }
 
 // stopServer shuts the HTTP server down once, giving in-flight requests 5s.

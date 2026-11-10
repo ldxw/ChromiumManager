@@ -53,6 +53,9 @@ ENV MCP_KEYS=
 ENV MCP_KEYS_FILE=
 # 省写分组时用的默认分组名；value 里带「分组名/」的条目不使用它
 ENV MCP_GROUP_NAME=mcp
+# 设为 1 时容器启动后自动 launch MCP_KEYS 建出来的每个配置，客户端不必先调
+# launch_profile。单个配置启动失败只记日志，不影响其他配置与容器本身。
+ENV MCP_AUTOLAUNCH=0
 # 外部 MCP 监听地址，容器外可直接连；设为 off 关闭
 ENV MCP_HTTP_ADDR=0.0.0.0:10102
 # Chromium 沙箱：auto 按容器 seccomp 状态判断，1 强制启用，0 强制关闭。

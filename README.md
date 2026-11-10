@@ -80,6 +80,7 @@ services:
       # - MCP_KEYS={"key1":"窗口1","key2":"项目A/窗口1"}
       # - MCP_KEYS_FILE=/config/mcp-keys.json
       # - MCP_GROUP_NAME=mcp
+      # - MCP_AUTOLAUNCH=1
       # - MCP_HTTP_ADDR=0.0.0.0:10102
       # Chromium 沙箱，auto 为默认行为；改成 1 还需配合 seccomp 放开
       # - CHROME_SANDBOX=auto
@@ -126,6 +127,7 @@ docker run -d \
   -e MCP_KEYS= \
   -e MCP_KEYS_FILE= \
   -e MCP_GROUP_NAME=mcp \
+  -e MCP_AUTOLAUNCH=0 \
   -e MCP_KEY_SLUGS= \
   -e MCP_SHIM_CDP_URL= \
   -e MCP_HTTP_ADDR=0.0.0.0:10102 \
@@ -137,9 +139,11 @@ docker run -d \
 ```
 
 上面 `MCP_TOKEN` / `MCP_KEYS` / `MCP_KEYS_FILE` 留空即不启用鉴权与 key 绑定，
-`MCP_GROUP_NAME` 与 `MCP_HTTP_ADDR` 取的就是镜像默认值。要开启时把对应值填进去，
+`MCP_GROUP_NAME`、`MCP_AUTOLAUNCH` 与 `MCP_HTTP_ADDR` 取的就是镜像默认值。要开启时把对应值填进去，
 例如 `-e MCP_KEYS='{"key1":"窗口1","key2":"项目A/窗口1","key3":"项目B/窗口1"}'`，
-value 支持 `配置名` 与 `分组名/配置名` 两种写法，详见「多 key 绑定」。
+value 支持 `配置名` 与 `分组名/配置名` 两种写法，详见「多 key 绑定」。想让这些配置在容器
+启动时自动跑起来，再加 `-e MCP_AUTOLAUNCH=1`。
+
 `MCP_KEY_SLUGS` / `MCP_SHIM_CDP_URL` 只在多 key 下按 key 分发伪装脚本时才需要，
 见「多 key 与浏览器路径脚本」。
 
@@ -685,6 +689,7 @@ Streamable HTTP（先正常运行程序）：
 | `MCP_KEYS` | 空 | 多 key 绑定，JSON 对象，value 写 `配置名` 或 `分组名/配置名`，见「多 key 绑定」。设置后优先于 `MCP_TOKEN` |
 | `MCP_KEYS_FILE` | 空 | 从文件读取上面那份 JSON；与 `MCP_KEYS` 同时设置时以 `MCP_KEYS` 为准 |
 | `MCP_GROUP_NAME` | `mcp` | 省写分组时用的默认分组名；value 里带 `分组名/` 的条目不受它影响 |
+| `MCP_AUTOLAUNCH` | `0` | 设为 `1` 时容器启动后自动 launch `MCP_KEYS` 建出来的每个配置。默认关闭，客户端仍按需调 `launch_profile` |
 | `MCP_KEY_SLUGS` | 空 | `/chrome-mcp-<slug>` 的文件名后缀，JSON 对象，形如 `{"key1":"1","key2":"2"}`。只影响下载文件名，不参与鉴权；未配置的 token 用 token 本身。需与 `MCP_KEYS` 一起用 |
 | `MCP_SHIM_CDP_URL` | 空 | 预填版脚本里写死的 `CDP_HTTP`（manager 地址）。不设时按请求 Host 加 `MCP_HTTP_ADDR` 的端口推断；必须给明文 `http://` |
 | `MCP_HTTP_ADDR` | `0.0.0.0:10102` | 外部直连监听地址；设为 `127.0.0.1:10102` 仅本机可用，设为 `off` 关闭。空值按默认处理，`0` / `false` 与 `off` 等价 |
@@ -741,7 +746,13 @@ docker run -d --name chromium-manager \
 
 1. 按需创建 value 里出现的每个分组（`MCP_GROUP_NAME` 只在省写分组时才会用到），已经存在的直接复用；
 2. 在各分组下按配置名找配置，没有就建一个（自动分配随机指纹种子），**只创建不启动**；
-3. 建立 key → 配置 的内存映射，日志里只打印 key 前 4 位。
+3. 建立 key → 配置 的内存映射，日志里只打印 key 前 4 位；
+4. 设了 `MCP_AUTOLAUNCH=1` 时，逐个 `launch` 这些配置，客户端连上就能直接 `navigate`。
+
+第 4 步默认不做。运行中的实例只记在内存里，容器重启后一律为空，不自动启动时客户端得
+自己先发一次 `launch_profile`（多 key 下 `id` 可省略），否则浏览器类工具返回
+`profile is not running：请先 launch_profile`。自动启动在后台串行执行，每个配置间隔一秒；
+某个配置起不来只记一条日志，其余配置与容器本身不受影响。
 
 客户端照常 `Authorization: Bearer key1` 即可。绑定生效后：
 
@@ -936,9 +947,9 @@ docker run -d --name chromium-manager \
 这条提示只是 `--no-sandbox` 的警告文案，可以用 `--test-type` 把它藏掉，但沙箱仍然是关着的，
 镜像不做这种遮盖。
 
-镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_TOKEN=` / `MCP_KEYS=` / `MCP_KEYS_FILE=` /
-`MCP_KEY_SLUGS=` / `MCP_SHIM_CDP_URL=`（空）、`MCP_GROUP_NAME=mcp`、
-`MCP_HTTP_ADDR=0.0.0.0:10102`、`CHROME_SANDBOX=auto`，
+镜像里的默认值是 `MCP_ENABLE_DESTRUCTIVE=0`、`MCP_AUTOLAUNCH=0`、
+`MCP_TOKEN=` / `MCP_KEYS=` / `MCP_KEYS_FILE=` / `MCP_KEY_SLUGS=` / `MCP_SHIM_CDP_URL=`（空）、
+`MCP_GROUP_NAME=mcp`、`MCP_HTTP_ADDR=0.0.0.0:10102`、`CHROME_SANDBOX=auto`，
 `docker run -e` 或 compose 的 `environment` 会覆盖它们。这几个变量都在
 进程或浏览器启动时读取，MCP 相关的改了要重启容器才生效。
 

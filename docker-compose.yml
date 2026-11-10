@@ -52,6 +52,9 @@ services:
       # - MCP_KEYS_FILE=/config/mcp-keys.json
       # 省写分组时用的默认分组名，默认 mcp；带「分组名/」的条目不使用它
       # - MCP_GROUP_NAME=mcp
+      # 设为 1 时容器启动后自动 launch 上面 MCP_KEYS 建出来的每个配置，
+      # 客户端连上即可直接 navigate，不必先调 launch_profile。默认 0。
+      # - MCP_AUTOLAUNCH=1
       # 按 key 下载伪装脚本时的文件名后缀：GET /chrome-mcp-1 得 chrome-mcp-1，
       # 内容已预填该 key 的凭据，下载后 chmod +x 即用。只影响文件名，不参与鉴权；
       # 没配的 token 直接用 token 本身。需与 MCP_KEYS 一起用。
