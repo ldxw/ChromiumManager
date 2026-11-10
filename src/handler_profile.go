@@ -307,8 +307,17 @@ func launchProfileByID(idStr string) error {
 	}
 
 	proxy := getProxyInfo(rawProxy)
+	var proxyCleanup func()
 	if proxy.URL != "" {
-		launchArgs = append(launchArgs, "--proxy-server="+proxy.URL)
+		// Chromium 不认 --proxy-server 里的 userinfo，HTTP 与 SOCKS5 都要单独处理，
+		// 见 buildProxyLaunchArgs。
+		arg, extra, cleanup, err := buildProxyLaunchArgs(proxy.URL, p.Fingerprint.Seed)
+		if err != nil {
+			log.Printf("[Chrome] 代理带认证但准备失败（profile %s）：%v", p.Name, err)
+		}
+		proxyCleanup = cleanup
+		launchArgs = append(launchArgs, "--proxy-server="+arg)
+		launchArgs = append(launchArgs, extra...)
 	}
 
 	fp := p.Fingerprint
@@ -370,6 +379,9 @@ func launchProfileByID(idStr string) error {
 
 	cmd := exec.Command(chromePath, launchArgs...)
 	if err := cmd.Start(); err != nil {
+		if proxyCleanup != nil {
+			proxyCleanup()
+		}
 		return fmt.Errorf("Failed to launch: %w", err)
 	}
 
@@ -388,6 +400,9 @@ func launchProfileByID(idStr string) error {
 	go func() {
 		cmd.Wait()
 		close(done)
+		if proxyCleanup != nil {
+			proxyCleanup()
+		}
 		log.Printf("[Chrome] profile %s (%s) exited", p.Name, p.ID)
 
 		// 进程没了，缓存的 CDP 连接也没用了；不关会一直挂在已死的 websocket 上。
