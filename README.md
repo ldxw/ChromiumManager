@@ -215,7 +215,7 @@ false 时只 `console.error` 一行 `VNC stripe decoder config not supported for
 切到 `jpeg` 时才走主解码器，那条路径失败会进 `Fi()`：降 encoder、写 `_crash_count`、3 秒后
 整页 reload。
 
-镜像构建时删掉该字段（`Dockerfile` 里对 `selkies-dashboard/assets/index-*.js` 的 `sed`），
+镜像构建时删掉该字段（`scripts/patch-selkies.py` 处理 `selkies-dashboard/assets/index-*.js`），
 退回实测可行的「不传」路径。电脑之所以能看，是桌面 Chromium 接受了这个提示。
 
 改的是 `selkies-dashboard/assets/`，不是 nginx 的 root `/usr/share/selkies/web/`：后者在容器
@@ -244,7 +244,15 @@ false 时只 `console.error` 一行 `VNC stripe decoder config not supported for
 #### 手机端捏合缩放
 
 1920×1080 的流等比缩到手机竖屏上只有 390px 宽，内容小到看不清，需要捏合放大。上游有
-两处把这个手势堵死，镜像里都做了调整，同样不需要使用者配置：
+三处把这条手势堵死，另外还有一处会让手势和远端滚轮互相打架。镜像里四处都做了调整，
+不需要使用者配置。
+
+**根因在「第一根手指」：** 视频画面被 `input#overlayInput` 整块盖住
+（`opacity:0; position:absolute; width/height:100%; pointer-events:auto`），
+`_handleTouchEvent` 挂在它上面。单指落下时函数把 `h` 置 `true`，结尾
+`h&&this.element.contains(s.target)&&s.preventDefault()` 取消默认行为。**Chromium 一旦看到
+首指的 `touchstart` 被取消，就认为整条手势归页面所有，第二根手指落下时不再启动
+pinch-zoom。** 上下黑边落在 `div.video-container` 上，没有监听，所以那里能缩、画面里不能。
 
 **一、viewport 禁止缩放。** `selkies-dashboard/index.html` 写死：
 
@@ -252,30 +260,44 @@ false 时只 `console.error` 一行 `VNC stripe decoder config not supported for
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 ```
 
-`maximum-scale=1` 会把页面缩放上限钳在 1 倍。镜像里改成 `maximum-scale=10,user-scalable=yes`。
+`maximum-scale=1` 把缩放上限钳在 1 倍。镜像里改成 `maximum-scale=10,user-scalable=yes`。
 用 `Emulation.setPageScaleFactor` 请求 3 倍实测：未改的页面停在 `visualViewport.scale = 1`，
 改后到 `3`。
 
-**二、两指手势被当成滚轮吞掉。** `_handleTouchEvent` 在两指时置 `h = !0`，函数结尾
-`h&&this.element.contains(s.target)&&s.preventDefault()` 于是取消浏览器默认手势，两指
-换成发滚轮消息（`_triggerMouseWheel`）。只改 viewport 是无效的：实测两指 `touchmove`
-仍 5/5 被 `preventDefault`。镜像给结尾加上 `!this._isTwoFingerGesture`，两指不再被拦。
+**二、`touchstart` 一律放行。** 函数结尾补上 `u!=="touchstart"`，首指落下不再被取消，
+浏览器才会为第二根手指启动 pinch-zoom。单指的点击、拖动、长按仍由 `touchmove`/`touchend`
+分支接管，实测行为不变。
 
-单指操作不受影响，仍由 Selkies 接管（点击、拖动、长按、1→2→1 指的过渡都实测 `prevented`
-不变）。
+**三、两指分支不再 `preventDefault`。** 结尾另加 `!this._isTwoFingerGesture`，两指
+`touchmove` 不被取消，手势交给浏览器。
 
-沙箱实测（iPhone UA、390×844、DPR 3，CDP 合成触摸；表中为两指 `touchmove` 被
-`preventDefault` 的条数）：
+**四、捏合期间不发滚轮。** 两指分支原来按质心位移调 `_triggerMouseWheel`；pinch-zoom 生效
+后 `visualViewport` 跟着走，质心位移会被误判成滚动，缩放的同时远端画面还在滚。现在只在
+「两指间距变化小于 8px 且页面未处于缩放态」时才发滚轮消息：未缩放时两指上下滑仍是滚动，
+张开/收拢以及缩放后的平移都交给浏览器。
 
-| 状态 | 两指 touchmove | 单指 touchmove | 请求 pageScale 3 |
-| --- | --- | --- | --- |
-| 上游原样 | 5/5 被拦 | 4/4 被拦 | 停在 1 |
-| 只改 viewport | 5/5 被拦 | 4/4 被拦 | 到 3 |
-| 两处都改 | 0/5 被拦 | 4/4 被拦 | 到 3 |
+沙箱 A/B 实测（同一台桌面 Chromium，iPhone UA、390×844、DPR 3，CDP
+`Input.dispatchTouchEvent` 发真实触摸，**先落一指再落第二指**）：
 
-CDP 合成的触摸事件不进浏览器 UI 手势流，所以 `visualViewport.scale` 不会因合成捏合而变；
-上表最后一列用 `Emulation.setPageScaleFactor` 测的是 viewport 钳制本身。真机上两指手势
-在浏览器层就能生效。
+| 操作 | 上游原样 | 镜像 |
+| --- | --- | --- |
+| 画面内容区捏合 | `scale` 停在 1.00 | `scale` 到 1.61，无滚轮消息 |
+| 上下黑边捏合 | `scale` 到 1.61 | `scale` 到 1.61 |
+| 两指上下滑（未缩放） | 滚轮 8 条 | 滚轮 8 条（保留） |
+| 单指拖动 / 点按 / 长按 1s / 双击 | 正常 | 正常 |
+| 首指先移 3/10/20px 再捏合 | `scale` 停在 1.00 | `scale` 到 1.61，无滚轮消息 |
+
+连续捏合可到 `scale=10` 并平移 viewport，缩小能回到 1。
+
+CDP 合成的触摸不进浏览器 UI 手势流，所以合成捏合得到的 `visualViewport.scale` 恒为 1；
+上表靠页面内读 `visualViewport` 与统计发出的滚轮消息判定，`maximum-scale` 则用
+`Emulation.setPageScaleFactor` 单独验证。真机上这条链路就是浏览器原生手势。
+
+补丁全部在 `scripts/patch-selkies.py`，由 `Dockerfile` 在构建期执行。脚本按**内容锚点**
+定位而不是 bundle 文件名（文件名带内容哈希，随上游版本变化），每处锚点都断言出现次数：
+上游改写法时构建直接失败，不会悄悄产出一个没有缩放的镜像。改的目录必须是
+`selkies-dashboard`，不是 nginx 的 root `web/`——后者在容器启动时会被 `init-nginx`
+用 `cp -a` 重建。
 
 #### 给外部自动化模块提供浏览器路径
 
