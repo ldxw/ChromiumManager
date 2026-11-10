@@ -22,7 +22,7 @@
 - **多维指纹** — Canvas、WebGL、Audio、Font、ClientRects、GPU
 
 ### 🌐 代理管理
-- **代理配置** — 集中管理代理服务器，HTTP、HTTPS、SOCKS4、SOCKS5代理协议（支持用户名、密码认证）
+- **代理配置** — 集中管理代理服务器，支持 HTTP、HTTPS、SOCKS5 协议与用户名密码认证（SOCKS4 不支持带凭据）
 - **IP/语言/时区关联** — 代理可绑定 IP 地址、语言、时区和位置
 - **自动继承** — 配置可自动继承关联代理的语言、时区和位置
 
@@ -392,6 +392,29 @@ Docker Hub，构建由 `.github/workflows/docker-image.yml` 完成：
 1. 进入代理管理页面
 2. 添加代理服务器
 3. 在配置中选择代理
+
+#### 带用户名密码的代理
+
+代理地址里可以直接写凭据，例如 `http://user:<密码>@1.2.3.4:8080` 或
+`socks5://user:<密码>@1.2.3.4:1080`。「检测」按钮走的是 Go 的 `http.Transport`，
+它自己会发 `Proxy-Authorization`，所以无论哪种协议都能检测到出口 IP。
+
+Chromium 这边不认 `--proxy-server` 里的 userinfo——带凭据的地址会被判成不支持的代理
+（`ERR_NO_SUPPORTED_PROXIES`），请求一个都发不出去。因此启动时凭据会被拆出来，按协议分别处理：
+
+| 协议 | 处理方式 | 结果 |
+| --- | --- | --- |
+| HTTP / HTTPS | 地址去掉 userinfo，另生成一个 MV3 扩展在 `webRequest.onAuthRequired` 里回凭据 | 正常 |
+| SOCKS5 | 在 `127.0.0.1` 起一个不带认证的本地中继，由中继用 RFC 1929 向上游认证 | 正常 |
+| SOCKS4 | 不处理，凭据按原样传给 Chromium | Chromium 自身限制，带凭据不可用 |
+
+SOCKS5 中继随实例启动、随实例退出关闭，端口是随机分配的，只监听 `127.0.0.1`。
+上游要求认证但凭据错时，管理器日志里会有
+`[SOCKS] 上游 <host>:<port> 认证失败：上游拒绝 SOCKS5 用户名密码`，
+浏览器侧只看到 `ERR_SOCKS_CONNECTION_FAILED`，排查先看管理器日志。
+
+> 检测结果里的 IPv6 地址只是代理出口的真实地址，与能不能打开网页无关；
+> 容器只有 IPv4 也不影响代理转发。
 
 ### Cookie 管理
 

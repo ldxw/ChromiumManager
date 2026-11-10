@@ -44,6 +44,11 @@ func fetchLocationInfo(proxyRawID int64) (timezone, lang, ip, location string) {
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	if proxyURLStr != "" {
+		// 标准库的 Transport 只认 socks5 scheme，socks5h 是 Chromium 那边的写法，
+		// 检测时归一成 socks5（两者都是把域名交给代理解析）。
+		if strings.HasPrefix(proxyURLStr, "socks5h://") {
+			proxyURLStr = "socks5://" + strings.TrimPrefix(proxyURLStr, "socks5h://")
+		}
 		if !strings.HasPrefix(proxyURLStr, "http://") && !strings.HasPrefix(proxyURLStr, "https://") && !strings.HasPrefix(proxyURLStr, "socks5://") {
 			proxyURLStr = "http://" + proxyURLStr
 		}
