@@ -209,6 +209,46 @@ false 时只 `console.error` 一行 `VNC stripe decoder config not supported for
 两种改法都不需要使用者操作。若手机上仍觉得字小，可以把 `SELKIES_MANUAL_*` 一起调高
 （如 `2560`×`1440`），前提是目标手机的解码器能吃下。
 
+#### 手机端捏合缩放
+
+1920×1080 的流等比缩到手机竖屏上只有 390px 宽，内容小到看不清，需要捏合放大。上游有
+两处把这个手势堵死，镜像里都做了调整，同样不需要使用者配置：
+
+**一、viewport 禁止缩放。** `selkies-dashboard/index.html` 写死：
+
+```html
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+```
+
+`maximum-scale=1` 会把页面缩放上限钳在 1 倍。镜像里改成 `maximum-scale=10,user-scalable=yes`。
+用 `Emulation.setPageScaleFactor` 请求 3 倍实测：未改的页面停在 `visualViewport.scale = 1`，
+改后到 `3`。
+
+**二、两指手势被当成滚轮吞掉。** `_handleTouchEvent` 在两指时置 `h = !0`，函数结尾
+`h&&this.element.contains(s.target)&&s.preventDefault()` 于是取消浏览器默认手势，两指
+换成发滚轮消息（`_triggerMouseWheel`）。只改 viewport 是无效的：实测两指 `touchmove`
+仍全部被 `preventDefault`。镜像给结尾加上 `!this._isTwoFingerGesture`，两指不再被拦。
+
+单指操作不受影响，仍由 Selkies 接管（点击、拖动、长按、1→2→1 指的过渡都实测 `prevented`
+不变）。
+
+沙箱 A/B 实测（同一台桌面 Chromium，iPhone UA、390×844、DPR 3，CDP
+`Input.dispatchTouchEvent` 发真实触摸；表中为 `touchmove` 被 `preventDefault` 的条数）：
+
+| 状态 | 两指 touchmove | 单指 touchmove | 请求 pageScale 3 |
+| --- | --- | --- | --- |
+| 上游原样 | 4/4 被拦 | 3/3 被拦 | 停在 1 |
+| 两处都改 | 0/4 被拦 | 3/3 被拦 | 到 3 |
+
+单指被拦是 Selkies 的正常行为（它要靠这个接管点击与拖动），两处补丁都没动它。
+
+CDP 合成的触摸事件不进浏览器 UI 手势流，所以 `visualViewport.scale` 不会因合成捏合而变；
+上表最后一列用 `Emulation.setPageScaleFactor` 测的是 viewport 钳制本身。真机上两指手势
+在浏览器层就能生效。
+
+两处补丁都在 `Dockerfile` 修补 Selkies 的那个 `RUN` 里，与删 `prefer-software` 同一段，
+每处 `sed` 前后都有计数校验：上游改写法时构建直接失败，不会悄悄产出一个没有缩放的镜像。
+
 #### PUID / PGID 只能设一次
 
 `PUID` / `PGID` 决定容器内 `abc` 用户的 UID / GID，也是挂载的 `./config` 的属主。基础镜像
