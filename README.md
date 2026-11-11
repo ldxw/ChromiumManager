@@ -293,6 +293,47 @@ pinch-zoom。** 上下黑边落在 `div.video-container` 上，没有监听，�
 
 连续捏合可到 `scale=10` 并平移 viewport，缩小能回到 1。
 
+**五、虚拟键盘按钮跟随可视区。** 右下角那个呼出软键盘的浮动按钮
+（`.virtual-keyboard-button`，50×50，默认 `right/bottom: 20px`）用的是 `position: fixed`。
+`fixed` 相对 **layout viewport** 定位，而捏合缩放改变的是 **visual viewport**：放大并
+平移之后，按钮仍然钉在 layout viewport 的右下角，屏幕上早已滑出可视范围，看不见也点不
+到，就再也呼不出键盘。上游没有任何 `visualViewport` 处理。
+
+按钮是可拖拽的：React 内联 style 写着 `position:fixed; right; bottom`，拖动后更新这两个
+值。补丁因此**不动 `right/bottom`**，只叠加一个 `transform`，边距仍取用户当前的
+`right`/`bottom`：
+
+```js
+x0 = layoutWidth  - right  - w
+y0 = layoutHeight - bottom - h
+dx = offsetLeft + width  - (w + right)  / scale - x0
+dy = offsetTop  + height - (h + bottom) / scale - y0
+el.style.transform = `translate(${dx}px,${dy}px) scale(${1 / scale})`
+```
+
+`visualViewport` 的 `width`/`height`/`offsetLeft`/`offsetTop` 都是 layout 坐标，
+`transform-origin: 0 0` 加 `scale(1/scale)` 让按钮的**屏幕尺寸恒为 50×50**。`scale=1`、
+`offset=0` 时 `dx=dy=0`，与上游原生行为完全一致，不干预正常布局。`visualViewport` 的
+`resize`/`scroll`、窗口 `resize`、`orientationchange` 都会触发重算，另加 100ms 轮询兜住
+地址栏收放与软键盘弹出这类不一定发事件的尺寸变化。
+
+真实 Chromium（iPhone UA、390×844、DPR 3）实测，用真实 bundle 与真实按钮样式：
+
+| 视口 | 上游原样 | 镜像 |
+| --- | --- | --- |
+| 未缩放 | 右下角 (320,774) | 右下角 (320,774)，`transform` 为零位移 |
+| 放大 2 倍 | 屏幕 (640,1548)，已出屏 | (320,774)，50×50 |
+| 放大 4 倍并右下平移 | 屏幕 (-1840,-3664)，已出屏 | (320,774)，50×50 |
+| 放大 10 倍 | 屏幕 (-20200,-42260)，已出屏 | (320,530)，50×50 |
+| 用户拖到左上后放大 3 倍 | 出屏 | 在屏，右边距 300 / 下边距 560 保持不变 |
+| 放大 4 倍后点按钮 | 点不到 | 命中一次 `click` |
+| 软键盘弹出（可视高 844→500） | 压在下边缘外 | 底边距仍是 20px |
+
+补丁不改 bundle，选择器只用按钮自带的类名，`</body>` 与 viewport 锚点仍做出现次数断言；
+逻辑写在 `index.html` 末尾的 `<style id="vk-follow-style">` 与
+`<script id="vk-follow-script">` 里，页面控制台会打一行 `[vk-follow] 已接管虚拟键盘按钮`
+（没找到按钮时打 warning，便于排查选择器）。
+
 CDP 合成的触摸不进浏览器 UI 手势流，所以合成捏合得到的 `visualViewport.scale` 恒为 1；
 上表靠页面内读 `visualViewport` 与统计发出的滚轮消息判定，`maximum-scale` 则用
 `Emulation.setPageScaleFactor` 单独验证。真机上这条链路就是浏览器原生手势。
