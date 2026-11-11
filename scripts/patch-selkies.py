@@ -36,6 +36,14 @@ bundle 文件名带内容哈希、随上游版本变化，所以按内容锚点�
   移动，质心位移会被误判成滚动，缩放同时还在滚远端画面。改为：两指间距变化超过 8px，
   或页面已处于缩放态（visualViewport.scale 与手势起始值不同），都不发滚轮消息。这样
   未缩放时两指上下滑仍是滚动，缩放后两指平移交给浏览器自己平移 viewport。
+
+六、虚拟键盘按钮要跟随可视区
+  右下角的浮动键盘按钮（class .virtual-keyboard-button，50x50，默认 right/bottom 20px）
+  用的是 position:fixed。fixed 相对 layout viewport 定位，而捏合缩放改变的是
+  visualViewport —— 放大并平移后按钮仍钉在 layout viewport 的右下角，实际已经滑出屏幕，
+  人看不到也点不到，就再也呼不出键盘。上游没有任何 visualViewport 处理。
+  按钮本身可拖拽（React 内联 right/bottom），所以不改 right/bottom，只叠加 transform：
+  未缩放时位移为 0，行为与上游完全一致。样式与脚本注入 index.html 末尾，不改 bundle。
 """
 
 import glob
@@ -104,11 +112,81 @@ sub(
 
 open(JS, 'w', encoding='utf-8').write(src)
 
+# 六、虚拟键盘按钮跟随可视区
+#
+# 按钮由 bundle 里的 React 组件渲染，选择器只用它自带的 data 属性与类名，
+# 不依赖带哈希的类名或 bundle 文本，所以不必改 JS bundle。
+#
+# 按钮本身是可拖拽的：React 内联 style 写着 position:fixed 与 right/bottom，
+# 拖动后更新这两个值。所以补丁**不碰 right/bottom**，只叠加一个 transform，
+# 且取「边距 = 当前的 right / bottom」，未缩放时位移正好为 0，与上游行为完全一致。
+#
+# 定位算法：
+#   position:fixed 钉在 layout viewport 上，捏合缩放不改变它的 layout 位置。
+#   visualViewport.width/height 是可视区在 layout 坐标下的尺寸（随 scale 变小），
+#   offsetLeft/offsetTop 是可视区左上角在 layout 坐标里的位置，scale 是缩放倍数。
+#   设 layout viewport 为 Lw×Lh、按钮布局尺寸 w×h、当前 right/bottom 为 R/B。
+#   按钮自然左上角 x0 = Lw - R - w，屏幕上出现在 (x0 - ox) * s。
+#   可视区右边缘在 layout 里是 ox + W，屏幕宽度是 W * s。
+#   施加 translate(dx,dy) scale(1/s)（origin 0 0）后按钮屏幕尺寸仍是 w×h，
+#   屏幕左上 = (x0 + dx - ox) * s。要右下角各留 R / B 的边距：
+#       dx = ox + W - (w + R) / s - x0
+#       dy = oy + H - (h + B) / s - y0
+#   s=1、ox=oy=0 时 dx=dy=0，即完全不干预。
+VK_CSS = (
+    '<style id="vk-follow-style">'
+    '.virtual-keyboard-button{'
+    'transform-origin:0 0!important;'
+    # 上游给 transform 加了 .15s 过渡；跟随 viewport 时每帧都在改，会拖成抖动。
+    'transition-property:background-color,border-color!important}'
+    '</style>'
+)
+VK_JS = (
+    '<script id="vk-follow-script">(function(){'
+    'var Q=".virtual-keyboard-button",seen=0;'
+    'function apply(){'
+    'var vv=window.visualViewport,el=document.querySelector(Q);'
+    'if(!el||!el.offsetWidth){'
+    # 只在第一次落空时提示一声，方便在控制台确认选择器是否命中。
+    'if(!seen){seen=1;console.warn("[vk-follow] 未找到虚拟键盘按钮，选择器 "+Q)}'
+    'return}'
+    'if(!seen){seen=1;console.info("[vk-follow] 已接管虚拟键盘按钮")}'
+    'var cs=getComputedStyle(el),'
+    'R=parseFloat(cs.right),B=parseFloat(cs.bottom);'
+    'if(!isFinite(R))R=20;if(!isFinite(B))B=20;'
+    'var s=vv&&vv.scale?vv.scale:1,'
+    'ox=vv?vv.offsetLeft:0,oy=vv?vv.offsetTop:0,'
+    'W=vv?vv.width:document.documentElement.clientWidth,'
+    'H=vv?vv.height:document.documentElement.clientHeight,'
+    'Lw=document.documentElement.clientWidth,'
+    'Lh=document.documentElement.clientHeight,'
+    'w=el.offsetWidth,h=el.offsetHeight,'
+    'x0=Lw-R-w,y0=Lh-B-h,'
+    'dx=ox+W-(w+R)/s-x0,dy=oy+H-(h+B)/s-y0,'
+    'v="translate("+dx+"px,"+dy+"px) scale("+(1/s)+")";'
+    # 用元素自身的 inline style 做缓存判据：React 重建按钮时新元素没有该样式，
+    # 会被重新定位，不会因为数值相同而被跳过。
+    'if(el.style.transform===v)return;'
+    'el.style.transform=v'
+    '}'
+    'if(window.visualViewport){'
+    'visualViewport.addEventListener("resize",apply);'
+    'visualViewport.addEventListener("scroll",apply)}'
+    'window.addEventListener("resize",apply);'
+    'window.addEventListener("orientationchange",apply);'
+    'setInterval(apply,100)'
+    '})();</script>'
+)
+
 # 二、viewport
 html = open(HTML, encoding='utf-8').read()
 if html.count('maximum-scale=1,user-scalable=no') != 1:
     sys.exit('[viewport] 锚点期望 1 处，上游写法已变化')
 html = html.replace('maximum-scale=1,user-scalable=no', 'maximum-scale=10,user-scalable=yes')
+
+if html.count('</body>') != 1:
+    sys.exit(f'[虚拟键盘按钮] </body> 期望 1 处，实际 {html.count("</body>")} 处')
+html = html.replace('</body>', VK_CSS + VK_JS + '</body>')
 open(HTML, 'w', encoding='utf-8').write(html)
 
 print('Selkies 前端补丁完成')
